@@ -1,0 +1,34 @@
+# Configuration du moteur (Phase 1).
+
+engine:
+  # Nombre d'événements traités avant l'arrêt (null = infini).
+  max_events: 2000
+  # Affichage console toutes les N trades.
+  report_every: 250
+
+feed:
+  # "simulated" pour l'instant ; "alpaca" arrivera en Phase 2.
+  provider: simulated
+  symbols: [SPY, QQQ, TLT, GLD]
+  seed: 42
+  # Intervalle entre deux trades simulés (secondes de temps de marché).
+  tick_seconds: 1.0
+
+bars:
+  timeframes: [5m, 1h, 1d]
+
+volatility:
+  # Facteur de décroissance EWMA (RiskMetrics : 0.94 en daily).
+  lambda: 0.94
+
+portfolio:
+  cash: 10000.0
+  positions:
+    SPY: {quantity: 10, avg_price: 620.0}
+    QQQ: {quantity: 5, avg_price: 540.0}
+    TLT: {quantity: 20, avg_price: 88.0}
+  target_weights:
+    SPY: 0.40
+    QQQ: 0.20
+    TLT: 0.20
+    GLD: 0.10

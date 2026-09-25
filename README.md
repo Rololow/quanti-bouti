@@ -6,6 +6,24 @@
 
 ---
 
+## Démarrage rapide
+
+```bash
+pip install -e ".[dev]"
+
+# Lance la boucle Core sur un flux simulé (config/config.yaml)
+python -m trading_engine.main
+
+# Tests
+pytest
+```
+
+État actuel : Phase 1 (Core) + volatilité EWMA et barres 5m / 1h / 1d, alimentées
+par un flux simulé déterministe. Le flux Alpaca WebSocket (Phase 2) se branchera
+derrière la même interface `MarketFeed`.
+
+---
+
 ## 1. Vision
 
 L'objectif du projet est de construire un **moteur quantitatif de monitoring et de décision de portefeuille en temps réel**.
@@ -1610,12 +1628,12 @@ Cela permet de réduire :
 ## Phase 1 — Core
 
 ```text
-[ ] Project structure
-[ ] Configuration
-[ ] EventBus
-[ ] MarketState
-[ ] PositionState
-[ ] PortfolioState
+[x] Project structure
+[x] Configuration
+[x] EventBus
+[x] MarketState
+[x] PositionState
+[x] PortfolioState
 ```
 
 ## Phase 2 — Realtime
@@ -1635,7 +1653,7 @@ Cela permet de réduire :
 ```text
 [ ] Returns
 [ ] Momentum
-[ ] EWMA volatility
+[x] EWMA volatility
 [ ] Mean reversion
 [ ] Correlation
 ```
