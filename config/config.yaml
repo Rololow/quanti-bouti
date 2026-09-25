@@ -7,12 +7,24 @@ engine:
   report_every: 250
 
 feed:
-  # "simulated" pour l'instant ; "alpaca" arrivera en Phase 2.
+  # "simulated" (flux déterministe, sans clé) ou "alpaca" (temps réel).
+  # Alpaca lit ses clés dans APCA_API_KEY_ID / APCA_API_SECRET_KEY.
   provider: simulated
   symbols: [SPY, QQQ, TLT, GLD]
   seed: 42
   # Intervalle entre deux trades simulés (secondes de temps de marché).
   tick_seconds: 1.0
+  alpaca:
+    # "iex" (plan gratuit) ou "sip" (plan payant). url permet de forcer un
+    # autre endpoint, ex. wss://stream.data.alpaca.markets/v2/test.
+    data_feed: iex
+    trades: true
+    quotes: false   # très volumineux en SIP
+    bars: true      # barres 1 minute Alpaca
+    heartbeat_interval: 20   # ping après N s sans message
+    heartbeat_timeout: 10    # reconnexion si pas de pong
+    backoff_initial: 1
+    backoff_max: 60
 
 bars:
   timeframes: [5m, 1h, 1d]

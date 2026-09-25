@@ -18,9 +18,22 @@ python -m trading_engine.main
 pytest
 ```
 
-État actuel : Phase 1 (Core) + volatilité EWMA et barres 5m / 1h / 1d, alimentées
-par un flux simulé déterministe. Le flux Alpaca WebSocket (Phase 2) se branchera
-derrière la même interface `MarketFeed`.
+État actuel : Phase 1 (Core) + Phase 2 (Realtime) + volatilité EWMA et barres
+5m / 1h / 1d.
+
+Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
+Alpaca temps réel :
+
+```bash
+export APCA_API_KEY_ID=...        # voir .env.example
+export APCA_API_SECRET_KEY=...
+# puis dans config/config.yaml : feed.provider: alpaca, engine.max_events: null
+python -m trading_engine.main
+```
+
+Le plan Alpaca gratuit donne accès au flux `iex`. Le client gère la
+reconnexion (backoff exponentiel), le heartbeat (ping WebSocket en cas
+d'inactivité) et horodate chaque événement (heure bourse + heure de réception).
 
 ---
 
@@ -1639,13 +1652,13 @@ Cela permet de réduire :
 ## Phase 2 — Realtime
 
 ```text
-[ ] Alpaca WebSocket
-[ ] Trade events
-[ ] Quote events
-[ ] Bar events
-[ ] Reconnection
-[ ] Heartbeat
-[ ] Event timestamps
+[x] Alpaca WebSocket
+[x] Trade events
+[x] Quote events
+[x] Bar events
+[x] Reconnection
+[x] Heartbeat
+[x] Event timestamps
 ```
 
 ## Phase 3 — Features

@@ -18,11 +18,25 @@ class EngineConfig:
 
 
 @dataclass(frozen=True)
+class AlpacaConfig:
+    data_feed: str = "iex"
+    url: str | None = None
+    trades: bool = True
+    quotes: bool = False
+    bars: bool = True
+    heartbeat_interval: float = 20.0
+    heartbeat_timeout: float = 10.0
+    backoff_initial: float = 1.0
+    backoff_max: float = 60.0
+
+
+@dataclass(frozen=True)
 class FeedConfig:
     provider: str = "simulated"
     symbols: tuple[str, ...] = ()
     seed: int | None = None
     tick_seconds: float = 1.0
+    alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
 
 
 @dataclass(frozen=True)
@@ -68,6 +82,7 @@ class Config:
                 symbols=tuple(feed.get("symbols", ())),
                 seed=feed.get("seed"),
                 tick_seconds=float(feed.get("tick_seconds", 1.0)),
+                alpaca=AlpacaConfig(**(feed.get("alpaca") or {})),
             ),
             bar_timeframes=tuple(bars.get("timeframes", ("5m", "1h", "1d"))),
             ewma_lambda=ewma_lambda,

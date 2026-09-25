@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Callable
 
 from trading_engine.config import Config
+from trading_engine.data.alpaca_feed import AlpacaMarketFeed
 from trading_engine.data.bar_builder import BarBuilder
 from trading_engine.data.event_bus import EventBus
 from trading_engine.data.events import BarEvent, EventType, QuoteEvent, TradeEvent
@@ -51,8 +52,14 @@ class Engine:
 
     def _default_feed(self) -> MarketFeed:
         feed_cfg = self.config.feed
+        if feed_cfg.provider == "alpaca":
+            return AlpacaMarketFeed.from_env(
+                feed_cfg.symbols,
+                max_events=self.config.engine.max_events,
+                **vars(feed_cfg.alpaca),
+            )
         if feed_cfg.provider != "simulated":
-            raise NotImplementedError(f"feed provider {feed_cfg.provider!r} not implemented yet")
+            raise ValueError(f"unknown feed provider {feed_cfg.provider!r}")
         initial = {
             sym: (
                 self.config.portfolio.positions[sym].avg_price
@@ -86,7 +93,10 @@ class Engine:
     def _on_bar(self, event: BarEvent) -> None:
         self.bars.append(event)
         self.market_state.update(event)
-        self.volatility.update(event.symbol, event.timeframe, event.close)
+        # Une barre corrigée (trades tardifs) remplace la précédente : ne pas
+        # la compter une seconde fois dans la volatilité.
+        if not event.payload.get("correction"):
+            self.volatility.update(event.symbol, event.timeframe, event.close)
 
     def snapshot(self) -> PortfolioState:
         vols = {sym: self.volatility.get(sym, TICK) for sym in self.market_state.prices()}
