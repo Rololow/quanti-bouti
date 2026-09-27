@@ -130,6 +130,24 @@ hard_controls:
   max_orders_per_day: 50
   max_daily_turnover: 1.0
 
+tax:
+  # Profil fiscal du pays de résidence (null = pas de fiscalité).
+  # Voir config/taxes/BE.toml : à vérifier avant tout usage réel.
+  profile: config/taxes/BE.toml
+  # Prix de référence au 31/12/2025 des positions détenues avant la taxe sur
+  # les plus-values (valeur d'acquisition fiscale), ex. {SPY: 640.0}.
+  step_up_prices: {}
+
+# Classification fiscale des instruments (utilisée par les règles du profil).
+#   asset_class: stock | etf | fund | bond
+#   domicile: code pays ISO-2 ; distribution: distributing | accumulating
+#   registered_locally: offert publiquement en Belgique (TOB 1,32 % si capitalisant)
+instruments:
+  SPY: {asset_class: etf, domicile: US, distribution: distributing}
+  QQQ: {asset_class: etf, domicile: US, distribution: distributing}
+  TLT: {asset_class: etf, domicile: US, distribution: distributing}
+  GLD: {asset_class: etf, domicile: US, distribution: accumulating}
+
 storage:
   # Journal JSONL des événements bruts reçus (null = désactivé). Sert au replay.
   event_log: null

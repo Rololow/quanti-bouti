@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -12,9 +13,19 @@ from trading_engine.allocation.constraints import Constraints
 from trading_engine.data.integrity import IntegrityConfig
 from trading_engine.execution.hard_controls import HardLimits
 from trading_engine.safety.safety_engine import SafetyConfig
+from trading_engine.tax.profile import Instrument
 from trading_engine.risk.limits import RiskLimits
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
+
+
+def resolve_path(path: str | Path) -> Path:
+    """Chemin absolu, ou relatif au répertoire courant, sinon à la racine du projet."""
+    p = Path(path)
+    if p.is_absolute() or p.exists():
+        return p
+    return PROJECT_ROOT / p
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,7 @@ class FeedConfig:
 class PositionConfig:
     quantity: float
     avg_price: float
+    acquired: date | None = None       # date d'achat (lots fiscaux) ; None = inconnue
 
 
 @dataclass(frozen=True)
@@ -142,6 +154,12 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class TaxConfig:
+    profile: str | None = None                     # ex. config/taxes/BE.toml ; None = pas de fiscalité
+    step_up_prices: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Config:
     engine: EngineConfig = field(default_factory=EngineConfig)
     feed: FeedConfig = field(default_factory=FeedConfig)
@@ -156,6 +174,8 @@ class Config:
     integrity: IntegrityConfig = field(default_factory=IntegrityConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     hard_controls: HardLimits = field(default_factory=HardLimits)
+    tax: TaxConfig = field(default_factory=TaxConfig)
+    instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "Config":
@@ -213,7 +233,7 @@ class Config:
             portfolio=PortfolioConfig(
                 cash=float(pf.get("cash", 0.0)),
                 positions={
-                    sym: PositionConfig(float(p["quantity"]), float(p["avg_price"]))
+                    sym: PositionConfig(float(p["quantity"]), float(p["avg_price"]), p.get("acquired"))
                     for sym, p in (pf.get("positions") or {}).items()
                 },
                 target_weights={
@@ -227,6 +247,10 @@ class Config:
             integrity=IntegrityConfig(**(raw.get("integrity") or {})),
             safety=SafetyConfig(**safety),
             hard_controls=HardLimits(**(raw.get("hard_controls") or {})),
+            tax=TaxConfig(**(raw.get("tax") or {})),
+            instruments={
+                sym: Instrument(sym, **spec) for sym, spec in (raw.get("instruments") or {}).items()
+            },
             storage=StorageConfig(event_log=storage.get("event_log")),
             models=ModelsConfig(
                 regimes=RegimesConfig(**(models.get("regimes") or {})),

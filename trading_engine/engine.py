@@ -1,4 +1,4 @@
-"""Assemblage de la boucle principale (README §40, milestone §54 — partie Core).
+"""Assemblage de la boucle principale (README §40, milestone §55 — partie Core).
 
     Feed → EventBus → MarketState / BarBuilder / FeatureEngine / Portfolio → console
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from datetime import date, datetime, timezone
 from typing import Callable
 
 import numpy as np
@@ -16,7 +17,7 @@ from trading_engine.allocation.baseline import BaselineAllocator
 from trading_engine.allocation.constraints import ConstraintEngine
 from trading_engine.allocation.drift import DriftMonitor, DriftReport
 from trading_engine.allocation.types import TargetAllocation
-from trading_engine.config import Config
+from trading_engine.config import Config, resolve_path
 from trading_engine.data.alpaca_feed import AlpacaMarketFeed
 from trading_engine.data.bar_builder import BarBuilder
 from trading_engine.data.event_bus import EventBus
@@ -34,6 +35,8 @@ from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
 from trading_engine.safety.safety_engine import SafetyEngine, SafetyState, SafetyStatus
 from trading_engine.storage.event_log import EventLogWriter
+from trading_engine.tax.profile import load_tax_profile
+from trading_engine.tax.tax_model import RebalanceTaxCost, TaxModel
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,7 @@ class Engine:
             },
             target_weights=config.portfolio.target_weights,
         )
+        self.tax = self._build_tax_model()
         self.risk = RiskEngine(
             self.features, timeframe=config.risk.timeframe,
             shrinkage=config.risk.shrinkage, limits=config.risk.limits,
@@ -100,6 +104,42 @@ class Engine:
         self.bus.subscribe(EventType.TRADE, self._on_trade)
         self.bus.subscribe(EventType.QUOTE, self._on_quote)
         self.bus.subscribe(EventType.BAR, self._on_bar)
+
+    def _build_tax_model(self) -> TaxModel | None:
+        if not self.config.tax.profile:
+            return None
+        model = TaxModel(
+            load_tax_profile(resolve_path(self.config.tax.profile)),
+            self.config.instruments,
+            self.config.tax.step_up_prices,
+        )
+        # Positions initiales : lots fiscaux à leur prix moyen. Date inconnue :
+        # considérée antérieure à toute taxe (step-up si un prix est fourni).
+        for sym, p in self.config.portfolio.positions.items():
+            if p.quantity > 0 and model.gains is not None:
+                model.gains.buy(sym, p.quantity, p.avg_price, p.acquired or date.min)
+        for warning in model.warnings():
+            logger.warning("tax: %s", warning)
+        return model
+
+    def record_fill(self, symbol: str, quantity: float, price: float, timestamp: datetime) -> None:
+        """Applique un fill : position, cash, taxe sur transaction et lots fiscaux."""
+        self.portfolio.apply_fill(symbol, quantity, price)
+        if self.tax is not None:
+            charge, _ = self.tax.record_fill(symbol, quantity, price, timestamp)
+            self.portfolio.cash -= charge.amount
+
+    def estimate_rebalance_tax(self) -> RebalanceTaxCost | None:
+        """Coût fiscal estimé pour rejoindre la cible actuelle depuis les poids courants."""
+        if self.tax is None:
+            return None
+        state = self._raw_snapshot()
+        trades = {
+            p.symbol: (p.target_weight - p.weight) * state.total_value for p in state.positions
+        }
+        prices = {p.symbol: p.price for p in state.positions}
+        when = state.timestamp or datetime.now(timezone.utc)
+        return self.tax.rebalance_cost(trades, prices, when)
 
     def _default_feed(self) -> MarketFeed:
         feed_cfg = self.config.feed

@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 
 from trading_engine.config import load_config
 from trading_engine.engine import Engine
@@ -107,3 +108,22 @@ def test_risk_breaches_are_published_once():
     asyncio.run(engine._publish_breaches(dataclasses.replace(report, breaches=())))
     asyncio.run(engine._publish_breaches(persistent))
     assert len(risk_events) == 2
+
+
+def test_fill_pays_transaction_tax_and_creates_tax_lot(t0):
+    import dataclasses
+
+    cfg = load_config()
+    engine = Engine(dataclasses.replace(cfg, engine=dataclasses.replace(cfg.engine, report_every=0)))
+    cash = engine.portfolio.cash
+    engine.record_fill("GLD", 10, 100.0, t0)             # ETF US : TOB 0,35 %
+    assert engine.portfolio.cash == pytest.approx(cash - 1000.0 - 3.5)
+    assert engine.tax.gains.lots["GLD"][0].quantity == 10
+
+
+def test_tax_can_be_disabled():
+    import dataclasses
+
+    cfg = load_config()
+    engine = Engine(dataclasses.replace(cfg, tax=dataclasses.replace(cfg.tax, profile=None)))
+    assert engine.tax is None and engine.estimate_rebalance_tax() is None

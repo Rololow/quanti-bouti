@@ -1,0 +1,138 @@
+# Profil fiscal : Belgique — personne physique résidente, gestion normale
+# d'un patrimoine privé.
+#
+# ⚠ Ce fichier n'est PAS un conseil fiscal. Les montants et taux sont ceux
+# connus lors de sa rédaction ; plusieurs sont indexés chaque année ou
+# récents (taxe sur les plus-values 2026). Vérifier auprès du SPF Finances
+# (finances.belgium.be) ou d'un conseiller avant toute utilisation réelle, et
+# mettre à jour `verified_on` après vérification.
+#
+# Tous les taux sont des fractions (0.0035 = 0,35 %), les montants en EUR.
+
+[meta]
+country = "BE"
+name = "Belgique — personne physique résidente"
+currency = "EUR"
+schema_version = 1
+written_on = "2026-09"
+verified_on = ""              # à remplir après vérification officielle
+sources = [
+  "SPF Finances — taxe sur les opérations de bourse (TOB)",
+  "SPF Finances — précompte mobilier",
+  "Loi instaurant une contribution de solidarité sur les plus-values (2026)",
+  "SPF Finances — taxe annuelle sur les comptes-titres",
+]
+
+# Zones géographiques utilisées par les règles (domicile des instruments).
+[regions]
+EEA = ["AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GR",
+       "HR", "HU", "IE", "IS", "IT", "LI", "LT", "LU", "LV", "MT", "NL", "NO",
+       "PL", "PT", "RO", "SE", "SI", "SK"]
+
+# ---------------------------------------------------------------------------
+# Taxe sur les opérations de bourse (TOB), à l'achat ET à la vente.
+# Avec un broker étranger (ex. Alpaca, Interactive Brokers…), le contribuable
+# déclare et paie lui-même la TOB (déclaration mensuelle).
+# Règles évaluées dans l'ordre : la première qui correspond s'applique.
+# ---------------------------------------------------------------------------
+[transaction_tax]
+name = "TOB"
+sides = ["buy", "sell"]
+self_declared_with_foreign_broker = true
+
+[[transaction_tax.rules]]
+id = "accumulating_fund_registered_in_belgium"
+description = "Fonds / ETF de capitalisation enregistré pour offre publique en Belgique"
+match = { asset_class = ["fund", "etf"], distribution = "accumulating", registered_locally = true }
+rate = 0.0132
+cap = 4000.0
+
+[[transaction_tax.rules]]
+id = "etf_eea"
+description = "ETF domicilié dans l'EEE"
+match = { asset_class = "etf", domicile_region = "EEA" }
+rate = 0.0012
+cap = 1300.0
+
+[[transaction_tax.rules]]
+id = "bond"
+description = "Obligations"
+match = { asset_class = "bond" }
+rate = 0.0012
+cap = 1300.0
+
+[[transaction_tax.rules]]
+id = "shares_and_other_etf"
+description = "Actions et ETF domiciliés hors EEE"
+match = { asset_class = ["stock", "etf"] }
+rate = 0.0035
+cap = 1600.0
+
+[[transaction_tax.rules]]
+id = "default"
+description = "Par défaut (prudence) : taux actions"
+match = {}
+rate = 0.0035
+cap = 1600.0
+
+# ---------------------------------------------------------------------------
+# Précompte mobilier sur les revenus (dividendes, intérêts).
+# Dividendes étrangers : retenue du pays source, puis précompte belge sur le net.
+# ---------------------------------------------------------------------------
+[income_tax]
+dividend_rate = 0.30
+interest_rate = 0.30
+
+# Exonération des premiers dividendes, récupérable via la déclaration.
+# Montant indexé chaque année : à vérifier pour l'année en cours.
+[income_tax.dividend_exemption]
+amount = 833.0
+income_year = 2024
+recovered_via_tax_return = true
+
+# Retenue à la source étrangère effective (après formulaire de traité, ex. W-8BEN).
+[income_tax.foreign_withholding]
+US = 0.15
+default = 0.30               # hypothèse prudente si le pays n'est pas listé
+
+# Taxe « Reynders » : composante intérêts des fonds investis à plus de 10 % en
+# créances, lors de la vente / du rachat.
+[income_tax.interest_component]
+rate = 0.30
+bond_share_threshold = 0.10
+
+# ---------------------------------------------------------------------------
+# Contribution de solidarité sur les plus-values des actifs financiers.
+# Nouvelle taxe à partir du 1er janvier 2026 : vérifier le texte final.
+# ---------------------------------------------------------------------------
+[capital_gains]
+effective_from = 2026-01-01
+rate = 0.10
+annual_exemption = 10000.0          # par contribuable, indexé
+loss_offset = "same_year"           # moins-values compensables la même année seulement
+cost_basis_method = "fifo"          # hypothèse de ce moteur, à confirmer
+# Plus-values historiques gelées : valeur d'acquisition fiscale = valeur au
+# 31/12/2025 (ou coût réel s'il est plus élevé, pendant la période transitoire).
+step_up_date = 2025-12-31
+step_up_keeps_higher_cost = true
+
+# Exonération non utilisée reportable : 1 000 EUR par an, 5 ans maximum.
+[capital_gains.exemption_carry_forward]
+per_year = 1000.0
+max_years = 5
+
+# ⚠ Une gestion jugée « anormale » ou spéculative (trading très fréquent,
+# effet de levier…) peut être taxée comme revenu divers à 33 % (+ taxe
+# communale), hors du régime ci-dessus. Un moteur qui rebalance souvent doit
+# garder ce risque en tête.
+[capital_gains.speculative]
+rate = 0.33
+warning = "Trading fréquent : risque de requalification en revenus divers (33 %)."
+
+# ---------------------------------------------------------------------------
+# Taxe annuelle sur les comptes-titres.
+# ---------------------------------------------------------------------------
+[account_tax]
+rate = 0.0015
+threshold = 1000000.0               # valeur moyenne du compte
+basis = "average_value"

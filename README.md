@@ -27,9 +27,10 @@ avec oubli, régularisation, taille minimale d'échantillon, suivi du skill et
 détection de dérive), Phase 6 (volatilité ex-ante, contributions au risque,
 concentration, drawdown, limites et alertes) et Phase 7 (risk parity, HRP,
 budgets de risque issus des signaux, volatility targeting, Constraint Engine,
-attribution de la cible, drift monitoring) et Phase 8 (Data Integrity avec
+attribution de la cible, drift monitoring), Phase 8 (Data Integrity avec
 quarantaine des sauts non confirmés, Safety Engine NORMAL / DEGRADED / HALTED,
-hard controls indépendants des modèles).
+hard controls indépendants des modèles) et profils fiscaux par pays (TOML,
+Belgique fournie).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -2335,7 +2336,53 @@ $$
 
 ---
 
-# 51. V1 Development Roadmap
+# 51. Fiscalité : profils par pays
+
+Les taxes font partie des coûts d'un rebalancement
+($\alpha_{net} = \alpha_{gross} - \dots - C_{tax}$) : un signal faible peut
+être détruit par la taxe sur les transactions ou par l'impôt sur une
+plus-value réalisée.
+
+Chaque pays est décrit par un fichier TOML (`config/taxes/<PAYS>.toml`) ; le
+code est générique et ne contient aucun taux :
+
+```text
+[meta]              pays, devise, sources, date de vérification
+[regions]           groupes de pays (ex. EEA) utilisables dans les règles
+[transaction_tax]   règles ordonnées (première correspondance) avec taux et plafond
+[income_tax]        dividendes, intérêts, retenues étrangères
+[capital_gains]     taux, date d'entrée en vigueur, exonération, report, step-up
+[account_tax]       taxe annuelle sur la valeur d'un compte
+```
+
+Les instruments sont classés dans `config.yaml` (`asset_class`, `domicile`,
+`distribution`, `registered_locally`) ; un instrument non classé reçoit la
+règle par défaut (prudente) et déclenche un avertissement.
+
+### Belgique (`config/taxes/BE.toml`)
+
+| Taxe | Règle modélisée |
+| ---- | --------------- |
+| TOB  | 0,12 % ETF domiciliés EEE et obligations (plafond 1 300 €), 0,35 % actions et ETF hors EEE (plafond 1 600 €), 1,32 % fonds de capitalisation enregistrés en Belgique (plafond 4 000 €), à l'achat et à la vente ; auto-déclarée avec un broker étranger |
+| Précompte mobilier | 30 % sur dividendes et intérêts, après retenue étrangère (US 15 %) ; exonération des premiers dividendes via la déclaration |
+| Plus-values (2026) | 10 % sur les plus-values réalisées nettes de l'année, exonération annuelle de 10 000 € avec report de 1 000 €/an (5 ans max), plus-values historiques gelées au 31/12/2025, lots FIFO |
+| Comptes-titres | 0,15 % au-delà d'une valeur moyenne de 1 M€ |
+
+⚠ Le profil n'est **pas un conseil fiscal** : montants indexés et taxe sur
+les plus-values récente, à vérifier auprès du SPF Finances puis à marquer
+`verified_on`. Un trading très fréquent peut aussi être requalifié en revenus
+divers (33 %).
+
+Le moteur :
+
+- comptabilise la TOB et les lots fiscaux à chaque fill ;
+- estime **avant** de décider le coût fiscal de rejoindre la cible
+  (TOB + impôt marginal sur les plus-values), qui entrera dans
+  $U_{rebalance}$ (Decision Engine).
+
+---
+
+# 52. V1 Development Roadmap
 
 ## Phase 1 — Core
 
@@ -2469,6 +2516,8 @@ $$
 [ ] Signal fusion (sans double comptage)
 [ ] Risk checks
 [ ] Hystérésis
+[x] Profils fiscaux par pays (TOML) — Belgique
+[ ] Coût fiscal dans U_rebalance
 [ ] U_rebalance vs U_donothing (alpha net, k · σ effectif)
 [ ] Filtres : data quality, safety state, stress tests
 [ ] Partial rebalance (execution weight, urgency)
@@ -2504,7 +2553,7 @@ $$
 
 ---
 
-# 52. Final target architecture
+# 53. Final target architecture
 
 ```text
                           REAL-TIME DATA
@@ -2581,7 +2630,7 @@ $$
 
 ---
 
-# 53. Design principles
+# 54. Design principles
 
 Le projet doit respecter les principes suivants :
 
@@ -2613,7 +2662,7 @@ Le projet doit respecter les principes suivants :
 
 ---
 
-# 54. First implementation milestone
+# 55. First implementation milestone
 
 La première milestone concrète est volontairement petite :
 

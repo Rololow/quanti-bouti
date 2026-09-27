@@ -58,6 +58,17 @@ def print_safety(engine: Engine) -> None:
           f"rejected_targets={engine.rejected_targets}")
 
 
+def print_tax(engine: Engine) -> None:
+    cost = engine.estimate_rebalance_tax()
+    if cost is None:
+        return
+    value = engine.portfolio.total_value()
+    print(f"  tax ({engine.tax.profile.country}): rejoindre la cible coûterait "
+          f"{engine.tax.profile.transaction_tax_name} {cost.transaction_tax:,.2f} + "
+          f"plus-values {cost.capital_gains_tax:,.2f} = {cost.total:,.2f} "
+          f"({cost.total / value:.3%} du portefeuille)")
+
+
 def print_allocation(engine: Engine) -> None:
     alloc = engine.last_allocation
     if alloc is None:
@@ -123,10 +134,14 @@ async def _run(config_path: str) -> None:
         print_models(engine)
         print_risk(engine)
         print_safety(engine)
+        print_tax(engine)
         print_allocation(engine)
         print_feed_status(engine)
 
     engine = Engine(load_config(config_path), reporter=report)
+    if engine.tax is not None:
+        for warning in engine.tax.warnings():
+            print(f"[tax] ⚠ {warning}")
     try:
         final = await engine.run()
     finally:
