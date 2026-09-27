@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import logging
+from collections import deque
 from typing import Callable
 
 import numpy as np
@@ -18,6 +20,7 @@ from trading_engine.config import Config
 from trading_engine.data.alpaca_feed import AlpacaMarketFeed
 from trading_engine.data.bar_builder import BarBuilder
 from trading_engine.data.event_bus import EventBus
+from trading_engine.data.integrity import REJECT, DataIntegrity, DataIssue
 from trading_engine.data.events import BarEvent, EventType, QuoteEvent, RiskEvent, TradeEvent
 from trading_engine.data.market_feed import MarketFeed, SimulatedMarketFeed
 from trading_engine.data.market_state import MarketStateStore
@@ -26,9 +29,13 @@ from trading_engine.features.feature_engine import FeatureEngine
 from trading_engine.models.model_engine import ModelEngine
 from trading_engine.portfolio.portfolio import Portfolio, PortfolioState
 from trading_engine.portfolio.positions import Position
+from trading_engine.execution.hard_controls import HardControls
 from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
+from trading_engine.safety.safety_engine import SafetyEngine, SafetyState, SafetyStatus
 from trading_engine.storage.event_log import EventLogWriter
+
+logger = logging.getLogger(__name__)
 
 
 class Engine:
@@ -41,6 +48,11 @@ class Engine:
         self.config = config
         self.bus = EventBus()
         self.market_state = MarketStateStore()
+        self.integrity = DataIntegrity(config.integrity)
+        self.data_issues: deque[DataIssue] = deque(maxlen=200)
+        self.safety = SafetyEngine(config.safety)
+        self.hard_controls = HardControls(config.hard_controls)
+        self.rejected_targets = 0
         self.bar_builder = BarBuilder(config.bar_timeframes)
         self.features = FeatureEngine(
             config.bar_timeframes,
@@ -122,7 +134,9 @@ class Engine:
         self.market_state.update(event)
         self.portfolio.update_price(event.symbol, event.price, event.timestamp)
         self.risk.on_price(event.symbol, event.price, event.timestamp)
-        self.risk.on_value(self.portfolio.total_value(), event.timestamp)
+        value = self.portfolio.total_value()
+        self.risk.on_value(value, event.timestamp)
+        self.safety.on_value(value, event.timestamp)
         self.features.on_trade(event)
         # L'horloge de marché (timestamp des trades) clôture les barres de
         # tous les symboles, même ceux qui ne tradent pas.
@@ -153,12 +167,25 @@ class Engine:
         """Une fois toutes les barres de l'intervalle traitées : nouvelle cible
         (sauf allocation statique), puis rapport de risque."""
         self._interval_due = False
-        if self.config.allocation.method != "static":
-            self._reallocate()
         self.risk_report = self.risk.evaluate(self._raw_snapshot())
         await self._publish_breaches(self.risk_report)
+        status = self.evaluate_safety()
+        if self.config.allocation.method != "static" and status.can_decide:
+            self._reallocate(status)
 
-    def _reallocate(self) -> None:
+    def evaluate_safety(self) -> SafetyStatus:
+        now = self.integrity.last_event_time
+        report = self.risk_report
+        return self.safety.evaluate(
+            now,
+            data_scores=self.integrity.scores(),
+            stale_symbols=self.integrity.stale_symbols(now),
+            corporate_actions={s: i.timestamp for s, i in self.integrity.corporate_actions.items()},
+            risk_breaches=[b.kind for b in report.breaches] if report else (),
+            model_health=self.models.health(),
+        )
+
+    def _reallocate(self, status: SafetyStatus) -> None:
         symbols = self.universe()
         cov = self.risk.covariance(symbols)
         if self.baseline is not None:
@@ -177,7 +204,24 @@ class Engine:
         constrained = self.constraints.apply(requested, current, cov, symbols)
         for sym, delta in constrained.adjustments.items():
             attribution.setdefault(sym, {})["constraints"] = delta
-        weights = constrained.weights
+        weights = dict(constrained.weights)
+
+        # Safety : symboles gelés à leur poids courant, pas réduit en DEGRADED.
+        if status.state is SafetyState.DEGRADED:
+            factor = self.config.safety.degraded_rebalance_factor
+            for sym in weights:
+                cur = current.get(sym, 0.0)
+                safe = cur if sym in status.frozen_symbols else cur + factor * (weights[sym] - cur)
+                attribution.setdefault(sym, {})["safety"] = safe - weights[sym]
+                weights[sym] = safe
+
+        # Hard controls : veto final, indépendant des modèles.
+        verdict = self.hard_controls.validate_targets(weights)
+        if not verdict.approved:
+            self.rejected_targets += 1
+            if status.timestamp is not None:
+                self.safety.record_hard_control_rejection(status.timestamp, "; ".join(verdict.violations))
+            return  # cible rejetée : on garde la précédente
         vol = None
         if cov is not None:
             vol = portfolio_vol(np.array([weights.get(s, 0.0) for s in symbols]), cov)
@@ -218,11 +262,19 @@ class Engine:
     async def run(self) -> PortfolioState:
         try:
             async for event in self.feed:
+                # Le journal garde les données brutes : le replay refait les
+                # mêmes contrôles d'intégrité.
                 if self.recorder is not None:
                     self.recorder.write(event)
-                await self.bus.publish(event)
-                if self._interval_due:
-                    await self._on_interval()
+                checked = self.integrity.check(event)
+                for issue in checked.issues:
+                    self.data_issues.append(issue)
+                    if issue.severity >= REJECT:
+                        logger.warning("data rejected: %s", issue)
+                for accepted in checked.accepted:
+                    await self.bus.publish(accepted)
+                    if self._interval_due:
+                        await self._on_interval()
         finally:
             if self.recorder is not None:
                 self.recorder.close()

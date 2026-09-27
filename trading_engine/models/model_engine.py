@@ -19,6 +19,7 @@ from trading_engine.data.events import BarEvent
 from trading_engine.features.feature_engine import FeatureEngine
 from trading_engine.models.online_factors import OnlineFactorModel
 from trading_engine.models.regime import RegimeModel, RegimeState
+from trading_engine.safety.safety_engine import ModelHealth
 from trading_engine.signals.signal import Signal
 
 
@@ -42,6 +43,7 @@ class ModelEngine:
             if config.factor.enabled
             else None
         )
+        self._seen_drifts = 0
 
     def _regime_model(self, symbol: str, horizon: str) -> RegimeModel:
         key = (symbol, horizon)
@@ -74,6 +76,23 @@ class ModelEngine:
         if self.factor_model is not None and bar.timeframe == self.factor_model.timeframe:
             snapshot = snapshot or self.features.snapshot(bar.symbol)
             self.factor_model.on_bar(bar.symbol, bar.close, snapshot, bar.end)
+
+    def health(self) -> ModelHealth:
+        """Dérives détectées depuis le dernier appel et valeurs non finies."""
+        health = ModelHealth()
+        fm = self.factor_model
+        if fm is not None:
+            health.drift_events = fm.monitor.drift_count - self._seen_drifts
+            self._seen_drifts = fm.monitor.drift_count
+            reg = fm.regression
+            if not (np.all(np.isfinite(reg.coef)) and np.all(np.isfinite(reg.P))):
+                health.non_finite = True
+                health.details.append("factor model coefficients")
+        for (sym, horizon), model in sorted(self._regime_models.items()):
+            if model.probs is not None and not np.all(np.isfinite(model.probs)):
+                health.non_finite = True
+                health.details.append(f"regime {sym} {horizon}")
+        return health
 
     def regimes(self, symbol: str) -> dict[str, RegimeState]:
         return dict(self._regimes.get(symbol, {}))

@@ -47,6 +47,17 @@ def print_risk(engine: Engine) -> None:
           f"target_change={_fmt(drift.target_change, '.1%')}")
 
 
+def print_safety(engine: Engine) -> None:
+    status = engine.safety.status
+    scores = engine.integrity.scores()
+    worst = min(scores.items(), key=lambda kv: kv[1]) if scores else None
+    print(f"  safety: {status.state.value} {'; '.join(status.reasons) or ''}".rstrip())
+    print(f"  data: accepted={engine.integrity.accepted} withheld={engine.integrity.withheld} "
+          f"worst_score={'-' if worst is None else f'{worst[0]} {worst[1]:.2f}'} "
+          f"issues={dict(sorted(engine.integrity.counts.items())) or '-'} "
+          f"rejected_targets={engine.rejected_targets}")
+
+
 def print_allocation(engine: Engine) -> None:
     alloc = engine.last_allocation
     if alloc is None:
@@ -111,6 +122,7 @@ async def _run(config_path: str) -> None:
         print_features(engine)
         print_models(engine)
         print_risk(engine)
+        print_safety(engine)
         print_allocation(engine)
         print_feed_status(engine)
 

@@ -9,6 +9,9 @@ from typing import Any, Mapping
 import yaml
 
 from trading_engine.allocation.constraints import Constraints
+from trading_engine.data.integrity import IntegrityConfig
+from trading_engine.execution.hard_controls import HardLimits
+from trading_engine.safety.safety_engine import SafetyConfig
 from trading_engine.risk.limits import RiskLimits
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
@@ -150,6 +153,9 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    integrity: IntegrityConfig = field(default_factory=IntegrityConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
+    hard_controls: HardLimits = field(default_factory=HardLimits)
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "Config":
@@ -166,6 +172,9 @@ class Config:
         alloc_constraints = Constraints(**(alloc.pop("constraints", None) or {}))
         risk = dict(raw.get("risk") or {})
         risk_limits = RiskLimits(**(risk.pop("limits", None) or {}))
+        safety = dict(raw.get("safety") or {})
+        if "halt_on_breaches" in safety:
+            safety["halt_on_breaches"] = tuple(safety["halt_on_breaches"])
         storage = raw.get("storage") or {}
         models = raw.get("models") or {}
         factor = dict(models.get("factor") or {})
@@ -215,6 +224,9 @@ class Config:
                 baseline=alloc_baseline, constraints=alloc_constraints, **alloc
             ),
             risk=RiskConfig(limits=risk_limits, **risk),
+            integrity=IntegrityConfig(**(raw.get("integrity") or {})),
+            safety=SafetyConfig(**safety),
+            hard_controls=HardLimits(**(raw.get("hard_controls") or {})),
             storage=StorageConfig(event_log=storage.get("event_log")),
             models=ModelsConfig(
                 regimes=RegimesConfig(**(models.get("regimes") or {})),

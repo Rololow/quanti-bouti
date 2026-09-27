@@ -27,7 +27,9 @@ avec oubli, régularisation, taille minimale d'échantillon, suivi du skill et
 détection de dérive), Phase 6 (volatilité ex-ante, contributions au risque,
 concentration, drawdown, limites et alertes) et Phase 7 (risk parity, HRP,
 budgets de risque issus des signaux, volatility targeting, Constraint Engine,
-attribution de la cible, drift monitoring).
+attribution de la cible, drift monitoring) et Phase 8 (Data Integrity avec
+quarantaine des sauts non confirmés, Safety Engine NORMAL / DEGRADED / HALTED,
+hard controls indépendants des modèles).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -2416,14 +2418,14 @@ $$
 ## Phase 8 — Data Integrity & Safety
 
 ```text
-[ ] Sanity checks (timestamps, prix, quotes, barres)
-[ ] Quarantaine des sauts non confirmés
-[ ] Détection de corporate actions probables
-[ ] Flux figé
-[ ] DataIntegrityScore par symbole
-[ ] Safety Engine (NORMAL / DEGRADED / HALTED)
-[ ] Perte journalière maximale
-[ ] Hard controls (cibles et ordres)
+[x] Sanity checks (timestamps, prix, quotes, barres)
+[x] Quarantaine des sauts non confirmés
+[x] Détection de corporate actions probables
+[x] Flux figé
+[x] DataIntegrityScore par symbole
+[x] Safety Engine (NORMAL / DEGRADED / HALTED)
+[x] Perte journalière maximale
+[x] Hard controls (cibles et ordres)
 ```
 
 ## Phase 9 — Robustness

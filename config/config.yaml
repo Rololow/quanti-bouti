@@ -100,6 +100,36 @@ risk:
     max_position_drawdown: 0.25
     max_drift: 0.05
 
+integrity:
+  max_clock_skew: 2.0     # s d'avance tolérées sur l'heure de réception
+  max_lateness: 300.0     # s de retard max par rapport au dernier événement du symbole
+  jump_k: 12.0            # saut suspect : > jump_k × |rendement| moyen ...
+  min_jump: 0.02          # ... et > 2 % -> quarantaine jusqu'au trade suivant
+  warmup_ticks: 20
+  max_spread: 0.05        # spread relatif signalé au-delà
+  stale_after: 300.0      # s sans donnée -> symbole figé
+
+safety:
+  degrade_data_score: 0.90
+  halt_data_score: 0.50
+  max_daily_loss: 0.03             # HALTED au-delà (aucune liquidation automatique)
+  halt_on_breaches: [DRAWDOWN, LEVERAGE]
+  max_hard_control_rejections: 3   # par jour
+  recovery_intervals: 3            # évaluations saines avant DEGRADED -> NORMAL
+  corporate_action_hold: 86400     # s de gel d'un symbole après un split probable
+  degraded_rebalance_factor: 0.5
+
+# Veto final, indépendant des modèles et du Constraint Engine.
+hard_controls:
+  max_target_weight: 0.50
+  max_target_gross: 1.0
+  max_order_notional: 50000
+  max_order_weight: 0.20
+  max_participation: 0.10
+  price_collar: 0.05
+  max_orders_per_day: 50
+  max_daily_turnover: 1.0
+
 storage:
   # Journal JSONL des événements bruts reçus (null = désactivé). Sert au replay.
   event_log: null

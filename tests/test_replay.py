@@ -86,6 +86,9 @@ def test_live_and_replay_produce_identical_state(tmp_path, method):
         assert replay.models.signals(sym) == live.models.signals(sym)
     assert any(live.models.regimes(sym) for sym in live.features.symbols())
     assert replay.risk_report == live.risk_report
+    assert replay.safety.status == live.safety.status
+    assert replay.integrity.counts == live.integrity.counts
+    assert replay.integrity.scores() == live.integrity.scores()
     if method != "static":
         assert live.last_allocation is not None
         assert replay.last_allocation == live.last_allocation
