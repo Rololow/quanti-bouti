@@ -73,8 +73,12 @@ def print_allocation(engine: Engine) -> None:
     alloc = engine.last_allocation
     if alloc is None:
         return
+    stress = engine.last_stress
+    worst = "" if stress is None or stress.worst is None else (
+        f" (pire scénario {stress.worst}: {stress.instability[stress.worst]:.1%})")
     print(f"  allocation ({engine.config.allocation.method}): "
           f"ex-ante vol={_fmt(alloc.portfolio_vol, '.1%')} "
+          f"robustness={_fmt(alloc.robustness, '.2f')}{worst} "
           f"binding={', '.join(alloc.binding) or '-'}")
     for sym, steps in sorted(alloc.attribution.items()):
         parts = "  ".join(f"{name} {delta:+.1%}" for name, delta in steps.items())
@@ -101,19 +105,35 @@ def print_features(engine: Engine) -> None:
 def print_models(engine: Engine) -> None:
     for sym in engine.features.symbols():
         regimes = engine.models.regimes(sym)
-        parts = [f"{h} {st.most_likely} {st.confidence:.0%}" for h, st in sorted(regimes.items())]
+        parts = [
+            f"{h} {'DEGRADED' if st.degraded else st.most_likely} {st.confidence:.0%}"
+            for h, st in sorted(regimes.items())
+        ]
         sigs = [
-            f"{sg.horizon} {sg.mean * 1e4:+.1f}bp ±{sg.std * 1e4:.1f}bp (P>0 {sg.prob_positive:.0%})"
+            f"{sg.horizon} {sg.mean * 1e4:+.1f}bp ±{sg.std * 1e4:.1f}bp "
+            f"(P>0 {sg.prob_positive:.0%}, fiab. {_fmt(sg.reliability, '.2f')})"
             for sg in engine.models.signals(sym)
         ]
         print(f"  {sym:<6} regime: {' | '.join(parts) or '-':<48} signal: {', '.join(sigs) or '-'}")
-    fm = engine.models.factor_model
-    if fm is not None:
-        mon = fm.monitor
-        skill = "-" if mon.skill is None else f"{mon.skill:+.3f}"
-        coverage = "-" if mon.coverage is None else f"{mon.coverage:.0%}"
-        print(f"  factor model: samples={fm.regression.n_updates} skill={skill} "
-              f"coverage(±1σ)={coverage} drifts={mon.drift_count}")
+    for name, model in engine.models.predictors.items():
+        mon = model.monitor
+        contexts = ", ".join(
+            f"{ctx} {_fmt(skill, '+.2f')} (n={n})"
+            for ctx, (n, skill) in model.reliability.contexts().items()
+        )
+        print(f"  predictor {name}: samples={model.regression.n_updates} "
+              f"skill={_fmt(mon.skill, '+.3f')} coverage(±1σ)={_fmt(mon.coverage, '.0%')} "
+              f"drifts={mon.drift_count} | skill par contexte: {contexts}")
+    ens = engine.models.ensemble
+    if ens is not None and len(ens.names) > 1:
+        corr = ens.correlation()
+        pairs = ", ".join(
+            f"{ens.names[i]}/{ens.names[j]} {corr[i, j]:+.2f}"
+            for i in range(len(ens.names)) for j in range(i + 1, len(ens.names))
+        )
+        weights = ", ".join(f"{n} {w:.2f}" for n, w in zip(ens.names, ens.weights()))
+        print(f"  ensemble: modèles effectifs={ens.effective_models():.2f} "
+              f"corr. erreurs: {pairs} | poids: {weights} (n={ens.n})")
 
 
 def print_feed_status(engine: Engine) -> None:

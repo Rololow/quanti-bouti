@@ -29,8 +29,10 @@ concentration, drawdown, limites et alertes) et Phase 7 (risk parity, HRP,
 budgets de risque issus des signaux, volatility targeting, Constraint Engine,
 attribution de la cible, drift monitoring), Phase 8 (Data Integrity avec
 quarantaine des sauts non confirmés, Safety Engine NORMAL / DEGRADED / HALTED,
-hard controls indépendants des modèles) et profils fiscaux par pays (TOML,
-Belgique fournie).
+hard controls indépendants des modèles), Phase 9 (MODEL_DEGRADED des HMM,
+fiabilité des prédicteurs par régime, ensemble pondéré par la corrélation des
+erreurs, stress tests de la cible, tests de perturbation) et profils fiscaux
+par pays (TOML, Belgique fournie).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -2277,6 +2279,13 @@ Quand les données deviennent incompatibles avec le modèle
 (Page-Hinkley) pour les modèles prédictifs, chute durable de la
 log-vraisemblance pour les HMM.
 
+Pour les HMM, la vraisemblance prédictive **hors échantillon**
+$\log p(x_t \mid x_{1:t-1})$ est suivie par deux moyennes (rapide et lente) ;
+leur écart est normalisé par sa variance mesurée (ce qui tient compte de
+l'autocorrélation des observations). Une référence prise dans l'échantillon
+d'ajustement serait optimiste et produirait de fausses alertes. Un symbole
+dont le régime est dégradé est gelé par le Safety Engine.
+
 ## 50.5 Prédictibilité ≠ fiabilité
 
 - **prédiction** : $\mu \pm \sigma$ ;
@@ -2478,11 +2487,11 @@ Le moteur :
 ## Phase 9 — Robustness
 
 ```text
-[ ] MODEL_DEGRADED (vraisemblance HMM)
-[ ] Fiabilité par contexte (régime, volatilité, horizon)
-[ ] Corrélation des erreurs entre modèles
-[ ] Stress tests de la cible
-[ ] Tests de perturbation (suite de tests / replay)
+[x] MODEL_DEGRADED (vraisemblance HMM)
+[x] Fiabilité par contexte (régime)
+[x] Corrélation des erreurs entre modèles (ensemble)
+[x] Stress tests de la cible
+[x] Tests de perturbation (suite de tests / replay)
 ```
 
 ## Phase 10 — Qualitative

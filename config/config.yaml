@@ -78,15 +78,29 @@ models:
     min_samples: 100       # warm-up avant le premier ajustement
     window: 500            # fenêtre glissante (oubli)
     refit_every: 50        # ré-ajustement Baum-Welch toutes les N barres
-  # Modèle de facteurs online : E[r_{t+h} | features], avec incertitude.
-  factor:
-    enabled: true
-    timeframe: 5m
-    horizon_bars: 6        # prévision à 30 minutes
-    features: [mom_30m, mom_1h, z_5m, reversal_5m, vwap_dist]
-    forgetting: 0.995      # poids lambda^age des observations passées
-    ridge: 10.0            # régularisation
-    min_samples: 50        # pas de signal avant N résultats observés
+    degraded_z: 4.0        # MODEL_DEGRADED : vraisemblance récente < moyenne longue - z écarts-types
+  # Prédicteurs online E[r_{t+h} | features] avec incertitude et fiabilité par
+  # régime. Même timeframe et même horizon pour tous (ils sont combinés).
+  predictors:
+    - name: trend
+      timeframe: 5m
+      horizon_bars: 6      # prévision à 30 minutes
+      features: [mom_30m, mom_1h]
+      forgetting: 0.995    # poids lambda^age des observations passées
+      ridge: 10.0          # régularisation
+      min_samples: 50      # pas de signal avant N résultats observés
+    - name: reversion
+      timeframe: 5m
+      horizon_bars: 6
+      features: [z_5m, reversal_5m, vwap_dist]
+      forgetting: 0.995
+      ridge: 10.0
+      min_samples: 50
+  # Combinaison selon la corrélation des erreurs (accord ≠ indépendance).
+  ensemble:
+    lam: 0.99
+    shrinkage: 0.5
+    min_samples: 30
 
 risk:
   timeframe: 1h          # barres utilisées pour la covariance
@@ -99,6 +113,13 @@ risk:
     max_risk_contribution: 0.50
     max_position_drawdown: 0.25
     max_drift: 0.05
+
+robustness:
+  # Stress tests de la cible à chaque rebalancement (vol d'un actif ×1.5,
+  # corrélations ↑/↓, signaux ±1σ). Score = stabilité de la forme de l'allocation.
+  enabled: true
+  min_score: 0.7   # en dessous : on ne fait que score × le chemin vers la cible
+  vol_bump: 1.5
 
 integrity:
   max_clock_skew: 2.0     # s d'avance tolérées sur l'heure de réception

@@ -33,6 +33,7 @@ from trading_engine.portfolio.positions import Position
 from trading_engine.execution.hard_controls import HardControls
 from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
+from trading_engine.robustness.stress import StressReport, stress_test
 from trading_engine.safety.safety_engine import SafetyEngine, SafetyState, SafetyStatus
 from trading_engine.storage.event_log import EventLogWriter
 from trading_engine.tax.profile import load_tax_profile
@@ -89,6 +90,7 @@ class Engine:
         self.constraints = ConstraintEngine(alloc.constraints)
         self.drift = DriftMonitor(config.risk.limits.max_drift)
         self.last_allocation: TargetAllocation | None = None
+        self.last_stress: StressReport | None = None
         self.risk_report: RiskReport | None = None
         self._active_breaches: frozenset[str] = frozenset()
         self._interval_due = False
@@ -234,13 +236,30 @@ class Engine:
             attribution = {s: {"baseline": w} for s, w in requested.items()}
         elif cov is not None:
             signals = {s: next(iter(self.models.signals(s)), None) for s in symbols}
-            fm = self.models.factor_model
-            skill = None if fm is None else fm.monitor.skill
-            requested, attribution, _ = self.allocator.allocate(symbols, cov, signals, skill)
+            # Crédibilité = fiabilité portée par chaque signal (par contexte).
+            requested, attribution, _ = self.allocator.allocate(symbols, cov, signals, None)
         else:
             return  # pas encore de covariance : on garde la cible actuelle
 
         current = {p.symbol: p.weight for p in self._raw_snapshot().positions}
+
+        # Robustness : une cible instable sous de petites perturbations des
+        # estimations est incertaine -> on ne fait qu'une partie du chemin.
+        robustness = None
+        rob = self.config.robustness
+        if rob.enabled and self.allocator is not None and cov is not None:
+            self.last_stress = stress_test(
+                lambda c, sig: self.allocator.allocate(symbols, c, sig, None)[0],
+                symbols, cov, signals, vol_bump=rob.vol_bump,
+                include_signals=self.allocator.method == "signal",
+            )
+            robustness = self.last_stress.score
+            if robustness < rob.min_score:
+                for sym in set(requested) | set(current):
+                    cur = current.get(sym, 0.0)
+                    damped = cur + robustness * (requested.get(sym, 0.0) - cur)
+                    attribution.setdefault(sym, {})["robustness"] = damped - requested.get(sym, 0.0)
+                    requested[sym] = damped
         constrained = self.constraints.apply(requested, current, cov, symbols)
         for sym, delta in constrained.adjustments.items():
             attribution.setdefault(sym, {})["constraints"] = delta
@@ -267,7 +286,7 @@ class Engine:
             vol = portfolio_vol(np.array([weights.get(s, 0.0) for s in symbols]), cov)
         self.last_allocation = TargetAllocation(
             weights=weights, attribution=attribution, portfolio_vol=vol,
-            binding=constrained.binding,
+            binding=constrained.binding, robustness=robustness,
         )
         self.drift.on_new_target(weights)
         self.portfolio.set_target_weights(weights)

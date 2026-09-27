@@ -1,4 +1,5 @@
-"""Format commun des signaux (README §49.9-49.10).
+"""Format commun des signaux (README §49.9-49.10, §50.5) :
+prédiction + incertitude + fiabilité.
 
 Un signal est une **prévision de rendement avec son incertitude**, pas un
 score sans unité : `mean` et `std` sont des log-rendements sur `horizon`,
@@ -21,6 +22,11 @@ class Signal:
     n_obs: int            # nombre d'observations ayant servi à l'apprendre
     timestamp: datetime
     source: str
+    # Fiabilité récente du modèle dans le contexte courant (README §50.5) :
+    # 0 = ne bat pas « prédire zéro », None = pas encore mesurée.
+    reliability: float | None = None
+    # Écart-type des prévisions des modèles d'un ensemble (déjà inclus dans std).
+    disagreement: float | None = None
 
     def __post_init__(self) -> None:
         if not self.std > 0:

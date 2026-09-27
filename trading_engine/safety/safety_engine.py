@@ -64,6 +64,8 @@ class ModelHealth:
     drift_events: int = 0            # dérives détectées depuis la dernière évaluation
     non_finite: bool = False         # coefficients / probabilités non finis
     details: list[str] = field(default_factory=list)
+    # (symbole, détail) des modèles dont les données ne collent plus (MODEL_DEGRADED)
+    degraded: list[tuple[str, str]] = field(default_factory=list)
 
 
 class SafetyEngine:
@@ -137,6 +139,9 @@ class SafetyEngine:
             halt.append("MODEL_EXPLOSION " + "; ".join(model_health.details))
         elif model_health.drift_events:
             degrade.append(f"MODEL_DRIFT x{model_health.drift_events}")
+        for sym, detail in model_health.degraded:
+            degrade.append(f"MODEL_DEGRADED {sym} {detail}")
+            frozen.add(sym)
 
         # risque et pertes
         for kind in risk_breaches:

@@ -62,7 +62,7 @@ def test_models_can_be_disabled():
     models = dataclasses.replace(
         cfg.models,
         regimes=dataclasses.replace(cfg.models.regimes, enabled=False),
-        factor=dataclasses.replace(cfg.models.factor, enabled=False),
+        predictors=tuple(dataclasses.replace(p, enabled=False) for p in cfg.models.predictors),
     )
     cfg = dataclasses.replace(
         cfg, models=models,
@@ -70,7 +70,8 @@ def test_models_can_be_disabled():
     )
     engine = Engine(cfg)
     asyncio.run(engine.run())
-    assert engine.models.factor_model is None
+    assert engine.models.factor_model is None and engine.models.ensemble is None
+    assert all(not engine.models.signals(s) for s in engine.features.symbols())
     assert all(not engine.models.regimes(s) for s in engine.features.symbols())
 
 

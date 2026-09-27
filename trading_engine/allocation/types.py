@@ -19,3 +19,4 @@ class TargetAllocation:
     portfolio_vol: float | None = None   # volatilité annualisée ex-ante
     vol_scale: float = 1.0
     binding: tuple[str, ...] = ()        # contraintes actives
+    robustness: float | None = None      # score de stress test (1 = stable)

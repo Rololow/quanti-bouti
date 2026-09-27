@@ -26,6 +26,7 @@ import numpy as np
 
 from trading_engine.models.monitoring import ModelMonitor
 from trading_engine.models.online_regression import OnlineLinearRegression
+from trading_engine.models.reliability import GLOBAL, ContextReliability
 from trading_engine.signals.signal import Signal
 from trading_engine.timeutils import format_timeframe, parse_timeframe
 
@@ -60,6 +61,21 @@ class _Pending:
     x: np.ndarray
     price: float
     prediction: tuple[float, float] | None
+    context: str = GLOBAL
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """Résultat réalisé d'une prévision (pour l'ensemble et la fiabilité)."""
+
+    realized: float
+    mean: float
+    std: float
+    context: str
+
+    @property
+    def error(self) -> float:
+        return self.realized - self.mean
 
 
 class OnlineFactorModel:
@@ -69,6 +85,7 @@ class OnlineFactorModel:
         *,
         timeframe: str,
         horizon_bars: int,
+        name: str = "factor",
         lam: float = 0.995,
         ridge: float = 10.0,
         min_samples: int = 50,
@@ -82,20 +99,30 @@ class OnlineFactorModel:
         self.timeframe = timeframe
         self.horizon_bars = horizon_bars
         self.horizon = format_timeframe(parse_timeframe(timeframe) * horizon_bars)
-        self.source = f"factor_{timeframe}"
+        self.name = name
+        self.source = f"{name}_{timeframe}"
         self.drift_inflation = drift_inflation
         self.regression = OnlineLinearRegression(
             len(self.feature_names), lam=lam, ridge=ridge, min_samples=min_samples
         )
         self.standardizer = EWMAStandardizer(len(self.feature_names))
         self.monitor = ModelMonitor()
+        self.reliability = ContextReliability()
+        self.last_outcome: dict[str, Outcome | None] = {}
         self._pending: dict[str, deque[_Pending]] = {}
         self._signals: dict[str, Signal] = {}
 
     def on_bar(
-        self, symbol: str, close: float, features: Mapping[str, float], timestamp: datetime
+        self,
+        symbol: str,
+        close: float,
+        features: Mapping[str, float],
+        timestamp: datetime,
+        context: str = GLOBAL,
     ) -> Signal | None:
+        """`context` : contexte de marché courant (ex. régime HF), pour la fiabilité."""
         queue = self._pending.setdefault(symbol, deque())
+        self.last_outcome[symbol] = None
 
         # 1. Résultats désormais connus : apprentissage.
         # Chaque barre ajoute une entrée à la file (None si features en warm-up),
@@ -107,6 +134,8 @@ class OnlineFactorModel:
                 realized = math.log(close / matured.price)
                 if matured.prediction is not None:
                     mean, std = matured.prediction
+                    self.last_outcome[symbol] = Outcome(realized, mean, std, matured.context)
+                    self.reliability.update(matured.context, realized, mean, std)
                     if self.monitor.update(realized, mean, std):
                         self.regression.inflate_uncertainty(self.drift_inflation)
                 self.regression.update(matured.x, realized)
@@ -118,7 +147,7 @@ class OnlineFactorModel:
             return None
         x = self.standardizer.update(np.array(values, dtype=float))
         prediction = self.regression.predict(x)
-        queue[-1] = _Pending(x, close, prediction)
+        queue[-1] = _Pending(x, close, prediction, context)
 
         if prediction is None:
             self._signals.pop(symbol, None)
@@ -127,6 +156,7 @@ class OnlineFactorModel:
         signal = Signal(
             symbol=symbol, horizon=self.horizon, mean=mean, std=std,
             n_obs=self.regression.n_updates, timestamp=timestamp, source=self.source,
+            reliability=self.reliability.reliability(context),
         )
         self._signals[symbol] = signal
         return signal

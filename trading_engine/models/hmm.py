@@ -78,8 +78,8 @@ def _forward_backward(X: np.ndarray, params: HMMParams):
     for t in range(T - 1):
         xi += np.outer(alpha[t], B[t + 1] * beta[t + 1]) * A / scale[t + 1]
 
-    loglik = float(np.sum(np.log(scale)) + np.sum(shift))
-    return gamma, xi, alpha, loglik
+    step_ll = np.log(scale) + shift[:, 0]     # log p(x_t | x_{1:t-1})
+    return gamma, xi, alpha, float(step_ll.sum()), step_ll
 
 
 def initial_params(X: np.ndarray, n_states: int, sort_dim: int = -1, stay: float = 0.9) -> HMMParams:
@@ -115,7 +115,7 @@ def fit(
     prev = -np.inf
     loglik = prev
     for _ in range(n_iter):
-        gamma, xi, _, loglik = _forward_backward(X, params)
+        gamma, xi, _, loglik, _ = _forward_backward(X, params)
         weights = gamma.sum(axis=0) + 1e-12
         means = (gamma.T @ X) / weights[:, None]
         variances = (gamma.T @ X**2) / weights[:, None] - means**2
@@ -132,15 +132,26 @@ def fit(
 
 def filter_probs(X: np.ndarray, params: HMMParams) -> np.ndarray:
     """P(S_T | x_{1:T}) sur une séquence (filtrage, pas de lissage)."""
-    _, _, alpha, _ = _forward_backward(np.asarray(X, dtype=float), params)
+    _, _, alpha, _, _ = _forward_backward(np.asarray(X, dtype=float), params)
     return alpha[-1]
+
+
+def step_logliks(X: np.ndarray, params: HMMParams) -> np.ndarray:
+    """log p(x_t | x_{1:t-1}) pour chaque t : vraisemblance prédictive pas à pas."""
+    return _forward_backward(np.asarray(X, dtype=float), params)[4]
 
 
 def filter_step(prev: np.ndarray, x: np.ndarray, params: HMMParams) -> np.ndarray:
     """Une étape de filtrage online : P(S_t | x_{1:t}) à partir de P(S_{t-1} | x_{1:t-1})."""
+    return filter_step_ll(prev, x, params)[0]
+
+
+def filter_step_ll(prev: np.ndarray, x: np.ndarray, params: HMMParams) -> tuple[np.ndarray, float]:
+    """Filtrage online + log p(x_t | x_{1:t-1}) (compatibilité des données avec le modèle)."""
     logb = log_emissions(np.asarray(x, dtype=float)[None, :], params)[0]
-    post = (prev @ params.transmat) * np.exp(logb - logb.max())
+    shift = logb.max()
+    post = (prev @ params.transmat) * np.exp(logb - shift)
     total = post.sum()
     if not np.isfinite(total) or total <= 0:
-        return np.full_like(prev, 1.0 / len(prev))
-    return post / total
+        return np.full_like(prev, 1.0 / len(prev)), -np.inf
+    return post / total, float(np.log(total) + shift)

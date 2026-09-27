@@ -48,12 +48,18 @@ class RiskAllocator:
     def signal_budgets(
         self, symbols: list[str], signals: Mapping[str, Signal | None], skill: float | None
     ) -> np.ndarray:
-        credibility = 0.0 if skill is None or skill <= self.min_skill else min(skill, 1.0)
+        """Budget = rendement attendu positif × crédibilité. La crédibilité est la
+        fiabilité du signal dans son contexte si elle est connue, sinon le skill
+        global ; en dessous de `min_skill`, aucun budget."""
         budgets = np.zeros(len(symbols))
         for i, sym in enumerate(symbols):
             sig = signals.get(sym)
-            if sig is not None and sig.mean > 0:
-                budgets[i] = sig.mean * credibility
+            if sig is None or sig.mean <= 0:
+                continue
+            credibility = sig.reliability if sig.reliability is not None else skill
+            if credibility is None or credibility <= self.min_skill:
+                continue
+            budgets[i] = sig.mean * min(credibility, 1.0)
         return budgets
 
     def allocate(

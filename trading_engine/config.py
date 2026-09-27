@@ -129,10 +129,12 @@ class RegimesConfig:
     min_samples: int = 100
     window: int = 500
     refit_every: int = 50
+    degraded_z: float = 4.0        # MODEL_DEGRADED si la vraisemblance récente chute de z écarts-types
 
 
 @dataclass(frozen=True)
 class FactorConfig:
+    name: str = "factor"
     enabled: bool = True
     timeframe: str = "5m"
     horizon_bars: int = 6
@@ -143,14 +145,29 @@ class FactorConfig:
 
 
 @dataclass(frozen=True)
+class EnsembleConfig:
+    lam: float = 0.99              # oubli de la covariance des erreurs
+    shrinkage: float = 0.5         # vers l'équipondération
+    min_samples: int = 30          # avant : erreurs supposées parfaitement corrélées
+
+
+@dataclass(frozen=True)
 class ModelsConfig:
     regimes: RegimesConfig = field(default_factory=RegimesConfig)
-    factor: FactorConfig = field(default_factory=FactorConfig)
+    predictors: tuple[FactorConfig, ...] = (FactorConfig(),)
+    ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
 
 
 @dataclass(frozen=True)
 class StorageConfig:
     event_log: str | None = None
+
+
+@dataclass(frozen=True)
+class RobustnessConfig:
+    enabled: bool = True
+    min_score: float = 0.7        # en dessous : cible jugée incertaine, mouvement réduit
+    vol_bump: float = 1.5
 
 
 @dataclass(frozen=True)
@@ -175,6 +192,7 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     hard_controls: HardLimits = field(default_factory=HardLimits)
     tax: TaxConfig = field(default_factory=TaxConfig)
+    robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -197,9 +215,16 @@ class Config:
             safety["halt_on_breaches"] = tuple(safety["halt_on_breaches"])
         storage = raw.get("storage") or {}
         models = raw.get("models") or {}
-        factor = dict(models.get("factor") or {})
-        if "features" in factor:
-            factor["features"] = tuple(factor["features"])
+        # "predictors" (liste) ; "factor" (un seul prédicteur) reste accepté.
+        predictor_specs = models.get("predictors")
+        if predictor_specs is None:
+            predictor_specs = [models["factor"]] if models.get("factor") else [{}]
+        predictors = []
+        for spec in predictor_specs:
+            spec = dict(spec)
+            if "features" in spec:
+                spec["features"] = tuple(spec["features"])
+            predictors.append(FactorConfig(**spec))
 
         ewma_lambda = float(vol.get("lambda", 0.94))
         if not 0.0 < ewma_lambda < 1.0:
@@ -248,13 +273,15 @@ class Config:
             safety=SafetyConfig(**safety),
             hard_controls=HardLimits(**(raw.get("hard_controls") or {})),
             tax=TaxConfig(**(raw.get("tax") or {})),
+            robustness=RobustnessConfig(**(raw.get("robustness") or {})),
             instruments={
                 sym: Instrument(sym, **spec) for sym, spec in (raw.get("instruments") or {}).items()
             },
             storage=StorageConfig(event_log=storage.get("event_log")),
             models=ModelsConfig(
                 regimes=RegimesConfig(**(models.get("regimes") or {})),
-                factor=FactorConfig(**factor),
+                predictors=tuple(predictors),
+                ensemble=EnsembleConfig(**(models.get("ensemble") or {})),
             ),
         )
 
