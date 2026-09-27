@@ -151,6 +151,27 @@ def print_features(engine: Engine) -> None:
         print(f"  corr {tf}: " + "  ".join(pairs))
 
 
+def print_qualitative(engine: Engine) -> None:
+    now = engine.features.now
+    shown = ("fund_eps_surprise", "fund_eps_growth", "fund_guidance_change", "qual_score",
+             "news_activity", "news_echo")
+    if engine.fundamentals.store.count == 0 and engine.news.articles == 0:
+        return
+    print(f"  qualitatif: {engine.fundamentals.store.count} faits fondamentaux, "
+          f"{engine.news.articles} articles -> "
+          f"{sum(len(engine.news.clusters(s)) for s in engine.features.symbols())} événements news")
+    print(f"  {'':<8} " + " ".join(f"{name.replace('fund_', '').replace('news_', 'n_'):>14}" for name in shown))
+    for sym in engine.features.symbols():
+        feats = engine.features.snapshot(sym)
+        print(f"  {sym:<8} " + " ".join(f"{_fmt(feats.get(name), '+.3f'):>14}" for name in shown))
+    for sym in engine.features.symbols():
+        clusters = engine.news.clusters(sym)
+        if clusters and now is not None:
+            c = clusters[-1]
+            print(f"    {sym} dernière news: \"{c.headlines[0]}\" ({c.articles} article(s), "
+                  f"{len(c.providers)} source(s))")
+
+
 def print_models(engine: Engine) -> None:
     for sym in engine.features.symbols():
         regimes = engine.models.regimes(sym)
@@ -200,6 +221,7 @@ async def _run(config_path: str) -> None:
     def report(state: PortfolioState) -> None:
         print_state(state)
         print_features(engine)
+        print_qualitative(engine)
         print_models(engine)
         print_risk(engine)
         print_safety(engine)

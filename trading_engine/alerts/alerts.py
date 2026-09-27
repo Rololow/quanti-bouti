@@ -11,9 +11,11 @@ quand une condition apparaît (pas à chaque évaluation tant qu'elle dure).
     SIGNAL_DISAGREEMENT   les modèles de l'ensemble divergent
     SAFETY_STATE          changement d'état du Safety Engine
     REBALANCE_PROPOSED    le Decision Engine propose un UREBALANCE
+    NEW_EARNINGS          nouveaux résultats publiés (avec la surprise)
+    GUIDANCE_CHANGE       nouvelle guidance, variation >= seuil
 
-(NEW_EARNINGS, GUIDANCE_CHANGE, IMPORTANT_NEWS viendront avec les phases
-news / fondamentaux.)
+(IMPORTANT_NEWS viendra avec la phase IA : l'importance d'une news demande
+une lecture structurée.)
 """
 
 from __future__ import annotations
@@ -54,6 +56,7 @@ class AlertConfig:
     # Les régimes HF basculent souvent : visibles dans le suivi, pas en alerte.
     regime_horizons: tuple[str, ...] = ("MT", "LT")
     regime_min_confidence: float = 0.8
+    guidance_change: float = 0.02      # variation relative minimale signalée
     disagreement_share: float = 0.5    # désaccord / incertitude totale
 
 
@@ -65,6 +68,7 @@ class AlertEngine:
         self._last_sign: dict[str, int] = {}
         self._last_safety: str | None = None
         self._corr_baseline: float | None = None
+        self._last_published: dict[tuple[str, str], datetime] = {}
         self._scale = math.sqrt(parse_timeframe(self.config.vol_slow) / parse_timeframe(self.config.vol_fast))
 
     def _state_alerts(self, conditions: list[Alert]) -> list[Alert]:
@@ -85,7 +89,11 @@ class AlertEngine:
         signals: Mapping[str, Signal | None] | None = None,
         safety_state: str | None = None,
         decision=None,
+        earnings: Mapping[str, tuple[datetime, float | None]] | None = None,
+        guidance: Mapping[str, tuple[datetime, float]] | None = None,
     ) -> list[Alert]:
+        """`earnings` : symbole -> (publication, surprise) du dernier EPS publié ;
+        `guidance` : symbole -> (publication, variation) de la dernière guidance."""
         cfg = self.config
         conditions: list[Alert] = []
         events: list[Alert] = []
@@ -145,6 +153,22 @@ class AlertEngine:
                 events.append(Alert("SAFETY_STATE", None, timestamp,
                                     f"{self._last_safety} → {safety_state}", severity))
             self._last_safety = safety_state
+
+        for sym, (published, surprise) in sorted((earnings or {}).items()):
+            key = ("earnings", sym)
+            if self._last_published.get(key) != published:
+                text = "résultats publiés" + (f", surprise {surprise:+.1%}" if surprise is not None else "")
+                severity = "warning" if surprise is not None and abs(surprise) >= 0.1 else "info"
+                events.append(Alert("NEW_EARNINGS", sym, timestamp, text, severity))
+                self._last_published[key] = published
+
+        for sym, (published, change) in sorted((guidance or {}).items()):
+            key = ("guidance", sym)
+            if self._last_published.get(key) != published:
+                if abs(change) >= cfg.guidance_change:
+                    events.append(Alert("GUIDANCE_CHANGE", sym, timestamp,
+                                        f"guidance EPS {change:+.1%}", "warning"))
+                self._last_published[key] = published
 
         if decision is not None and decision.action == "UREBALANCE":
             events.append(Alert("REBALANCE_PROPOSED", None, timestamp,

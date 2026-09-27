@@ -196,6 +196,37 @@ class ExecutionConfig:
 
 
 @dataclass(frozen=True)
+class FundamentalsSourceConfig:
+    # auto : simulé si le marché est simulé, sinon aucun (jamais de fausses
+    # données mélangées à un flux réel) ; none | simulated | file | edgar
+    provider: str = "auto"
+    path: str | None = None
+    weights: Mapping[str, float] | None = None
+    half_life_days: float = 30.0
+    edgar_user_agent: str = ""               # "Nom email@exemple.com" (exigé par la SEC)
+    edgar_ciks: Mapping[str, int] = field(default_factory=dict)
+    edgar_poll_every: float = 3600.0
+
+
+@dataclass(frozen=True)
+class NewsSourceConfig:
+    provider: str = "auto"                   # auto | none | simulated | file | alpaca
+    path: str | None = None
+    similarity: float = 0.5
+    window: str = "24h"
+    activity_half_life: str = "6h"
+
+
+@dataclass(frozen=True)
+class QualitativeConfig:
+    fundamentals: FundamentalsSourceConfig = field(default_factory=FundamentalsSourceConfig)
+    news: NewsSourceConfig = field(default_factory=NewsSourceConfig)
+    sim_earnings_every: str = "24h"
+    sim_news_every: str = "3h"
+    sim_duplicate_probability: float = 0.5
+
+
+@dataclass(frozen=True)
 class TaxConfig:
     profile: str | None = None                     # ex. config/taxes/BE.toml ; None = pas de fiscalité
     step_up_prices: Mapping[str, float] = field(default_factory=dict)
@@ -221,6 +252,7 @@ class Config:
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    qualitative: QualitativeConfig = field(default_factory=QualitativeConfig)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -308,6 +340,7 @@ class Config:
                 for k, v in (raw.get("decision") or {}).items()
             }),
             execution=_execution_config(raw.get("execution") or {}),
+            qualitative=_qualitative_config(raw.get("qualitative") or {}),
             alerts=AlertConfig(**{
                 k: tuple(v) if k == "regime_horizons" else v
                 for k, v in (raw.get("alerts") or {}).items()
@@ -323,6 +356,19 @@ class Config:
                 ensemble=EnsembleConfig(**(models.get("ensemble") or {})),
             ),
         )
+
+
+def _qualitative_config(raw: Mapping[str, Any]) -> QualitativeConfig:
+    raw = dict(raw)
+    fundamentals = FundamentalsSourceConfig(**(raw.pop("fundamentals", None) or {}))
+    news = NewsSourceConfig(**(raw.pop("news", None) or {}))
+    sim = raw.pop("simulated", None) or {}
+    return QualitativeConfig(
+        fundamentals=fundamentals, news=news,
+        sim_earnings_every=sim.get("earnings_every", "24h"),
+        sim_news_every=sim.get("news_every", "3h"),
+        sim_duplicate_probability=float(sim.get("duplicate_probability", 0.5)),
+    )
 
 
 def _execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:

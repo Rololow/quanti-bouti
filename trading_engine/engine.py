@@ -9,7 +9,7 @@ import dataclasses
 import logging
 import math
 from collections import deque
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
 import numpy as np
@@ -38,7 +38,15 @@ from trading_engine.decision.rebalance import Decision, DecisionContext, Decisio
 from trading_engine.data.market_feed import MarketFeed, SimulatedMarketFeed
 from trading_engine.data.market_state import MarketStateStore
 from trading_engine.data.replay_feed import ReplayFeed
+from trading_engine.data.alpaca_feed import AlpacaNewsFeed
+from trading_engine.data.edgar import EdgarFundamentalFeed
+from trading_engine.data.event_file_feed import EventFileFeed
+from trading_engine.data.events import FundamentalEvent, NewsEvent
+from trading_engine.data.merge import ConcurrentFeed, TimeMergedFeed
+from trading_engine.data.simulated_qualitative import SimulatedQualitativeFeed
 from trading_engine.features.feature_engine import FeatureEngine
+from trading_engine.features.fundamentals import FundamentalFeatures
+from trading_engine.news.news_engine import NewsEngine
 from trading_engine.models.model_engine import ModelEngine
 from trading_engine.portfolio.portfolio import Portfolio, PortfolioState
 from trading_engine.portfolio.positions import Position
@@ -57,6 +65,7 @@ from trading_engine.safety.safety_engine import SafetyEngine, SafetyState, Safet
 from trading_engine.storage.decision_log import DecisionLogWriter
 from trading_engine.storage.event_log import EventLogWriter
 from trading_engine.tax.profile import load_tax_profile
+from trading_engine.timeutils import parse_timeframe
 from trading_engine.tax.tax_model import RebalanceTaxCost, TaxModel
 
 logger = logging.getLogger(__name__)
@@ -78,6 +87,14 @@ class Engine:
         self.hard_controls = HardControls(config.hard_controls)
         self.rejected_targets = 0
         self.bar_builder = BarBuilder(config.bar_timeframes)
+        q = config.qualitative
+        self.fundamentals = FundamentalFeatures(
+            weights=q.fundamentals.weights, half_life_days=q.fundamentals.half_life_days
+        )
+        self.news = NewsEngine(
+            similarity=q.news.similarity, window=parse_timeframe(q.news.window),
+            activity_half_life=parse_timeframe(q.news.activity_half_life),
+        )
         self.features = FeatureEngine(
             config.bar_timeframes,
             momentum_horizons=config.features.momentum_horizons,
@@ -85,6 +102,8 @@ class Engine:
             zscore_window=config.features.zscore_window,
             correlation_timeframes=config.features.correlation_timeframes,
             lam=config.ewma_lambda,
+            fundamentals=self.fundamentals,
+            news=self.news,
         )
         self.models = ModelEngine(config.models, self.features)
         self.portfolio = Portfolio(
@@ -147,6 +166,8 @@ class Engine:
         self.bus.subscribe(EventType.TRADE, self._on_trade)
         self.bus.subscribe(EventType.QUOTE, self._on_quote)
         self.bus.subscribe(EventType.BAR, self._on_bar)
+        self.bus.subscribe(EventType.FUNDAMENTAL, self._on_fundamental)
+        self.bus.subscribe(EventType.NEWS, self._on_news)
 
     def _build_tax_model(self) -> TaxModel | None:
         if not self.config.tax.profile:
@@ -184,15 +205,54 @@ class Engine:
         when = state.timestamp or datetime.now(timezone.utc)
         return self.tax.rebalance_cost(trades, prices, when)
 
+    def _qualitative_provider(self, provider: str) -> str:
+        if provider == "auto":
+            return "simulated" if self.config.feed.provider == "simulated" else "none"
+        return provider
+
+    def _qualitative_feeds(self, market_start: datetime | None, market_end: datetime | None) -> list[MarketFeed]:
+        q = self.config.qualitative
+        symbols = self.config.feed.symbols
+        feeds: list[MarketFeed] = []
+        f_provider = self._qualitative_provider(q.fundamentals.provider)
+        n_provider = self._qualitative_provider(q.news.provider)
+        if "simulated" in (f_provider, n_provider):
+            sim = SimulatedQualitativeFeed(
+                symbols, start=market_start, until=market_end, seed=self.config.feed.seed,
+                earnings_every=parse_timeframe(q.sim_earnings_every) if f_provider == "simulated" else timedelta(days=36500),
+                news_every=parse_timeframe(q.sim_news_every) if n_provider == "simulated" else timedelta(days=36500),
+                duplicate_probability=q.sim_duplicate_probability,
+            )
+            feeds.append(sim)
+        for provider, cfg in ((f_provider, q.fundamentals), (n_provider, q.news)):
+            if provider == "file":
+                if not cfg.path:
+                    raise ValueError("qualitative source 'file' requires a path")
+                feeds.append(EventFileFeed(resolve_path(cfg.path)))
+        if f_provider == "edgar":
+            feeds.append(EdgarFundamentalFeed(
+                q.fundamentals.edgar_ciks, user_agent=q.fundamentals.edgar_user_agent,
+                poll_every=q.fundamentals.edgar_poll_every,
+            ))
+        if n_provider == "alpaca":
+            feeds.append(AlpacaNewsFeed.from_env(symbols or ["*"]))
+        unknown = {f_provider, n_provider} - {"none", "simulated", "file", "edgar", "alpaca"}
+        if unknown:
+            raise ValueError(f"unknown qualitative provider(s): {sorted(unknown)}")
+        return feeds
+
     def _default_feed(self) -> MarketFeed:
         feed_cfg = self.config.feed
         if feed_cfg.provider == "alpaca":
-            return AlpacaMarketFeed.from_env(
+            market = AlpacaMarketFeed.from_env(
                 feed_cfg.symbols,
                 max_events=self.config.engine.max_events,
                 **vars(feed_cfg.alpaca),
             )
+            extra = self._qualitative_feeds(None, None)
+            return ConcurrentFeed([market, *extra]) if extra else market
         if feed_cfg.provider == "replay":
+            # Le journal contient déjà tous les événements (marché, news, fondamentaux).
             if not feed_cfg.replay_path:
                 raise ValueError("feed.replay_path is required for the replay provider")
             return ReplayFeed(feed_cfg.replay_path, max_events=self.config.engine.max_events)
@@ -206,13 +266,25 @@ class Engine:
             )
             for sym in feed_cfg.symbols
         }
-        return SimulatedMarketFeed(
+        market = SimulatedMarketFeed(
             initial,
             seed=feed_cfg.seed,
             tick_seconds=feed_cfg.tick_seconds,
             annual_vol=feed_cfg.annual_vol,
             max_events=self.config.engine.max_events,
         )
+        end = None
+        if self.config.engine.max_events is not None:
+            end = market.clock + market.step * self.config.engine.max_events
+        extra = self._qualitative_feeds(market.clock, end)
+        return TimeMergedFeed([market, *extra]) if extra else market
+
+    def _on_fundamental(self, event: FundamentalEvent) -> None:
+        # Stocké tout de suite, visible seulement à partir de available_at.
+        self.fundamentals.store.add(event)
+
+    def _on_news(self, event: NewsEvent) -> None:
+        self.news.on_news(event)
 
     async def _on_trade(self, event: TradeEvent) -> None:
         self.market_state.update(event)
@@ -427,6 +499,25 @@ class Engine:
             },
         ))
 
+    def _latest_earnings(self, symbols: list[str]) -> dict[str, tuple[datetime, float | None]]:
+        now = self.features.now
+        out = {}
+        for sym in symbols:
+            fact = None if now is None else self.fundamentals.latest_fact(sym, "eps", now)
+            if fact is not None:
+                surprise = (fact.value - fact.estimate) / abs(fact.estimate) if fact.estimate else None
+                out[sym] = (fact.available_at, surprise)
+        return out
+
+    def _latest_guidance(self, symbols: list[str]) -> dict[str, tuple[datetime, float]]:
+        now = self.features.now
+        out = {}
+        for sym in symbols:
+            hist = [] if now is None else self.fundamentals.store.history(sym, "guidance_eps", now)
+            if len(hist) >= 2 and hist[-2].value:
+                out[sym] = (hist[-1].available_at, (hist[-1].value - hist[-2].value) / abs(hist[-2].value))
+        return out
+
     async def _publish_alerts(self, status: SafetyStatus, decision: Decision | None) -> None:
         symbols = self.universe()
         cfg = self.config.alerts
@@ -445,6 +536,8 @@ class Engine:
             signals={s: next(iter(self.models.signals(s)), None) for s in symbols},
             safety_state=status.state.value,
             decision=decision,
+            earnings=self._latest_earnings(symbols),
+            guidance=self._latest_guidance(symbols),
         )
         for alert in alerts:
             self.alerts.append(alert)

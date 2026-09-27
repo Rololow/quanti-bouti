@@ -99,6 +99,16 @@ models:
       forgetting: 0.995
       ridge: 10.0
       min_samples: 50
+    # Fondamentaux + news : à activer avec des données réelles (sur données
+    # simulées, ils n'ont aucun pouvoir prédictif par construction).
+    - name: quality
+      enabled: false
+      timeframe: 5m
+      horizon_bars: 6
+      features: [qual_score, fund_eps_surprise, news_activity]
+      forgetting: 0.999
+      ridge: 10.0
+      min_samples: 50
   # Combinaison selon la corrélation des erreurs (accord ≠ indépendance).
   ensemble:
     lam: 0.99
@@ -207,6 +217,29 @@ hard_controls:
   price_collar: 0.05
   max_orders_per_day: 50
   max_daily_turnover: 1.0
+
+qualitative:
+  # Sources : auto = simulé si feed.provider est "simulated", sinon aucune
+  # (jamais de fausses news mélangées à un flux réel).
+  fundamentals:
+    provider: auto          # auto | none | simulated | file | edgar
+    path: null              # file : JSONL de FundamentalEvent (point-in-time)
+    half_life_days: 30      # atténuation du score qualitatif
+    weights: {fund_eps_surprise: 0.4, fund_eps_growth: 0.2, fund_revenue_growth: 0.2, fund_guidance_change: 0.2}
+    # edgar : la SEC exige un User-Agent "Nom email" ; CIK par symbole (actions US).
+    edgar_user_agent: ""
+    edgar_ciks: {}          # ex. {AAPL: 320193}
+    edgar_poll_every: 3600
+  news:
+    provider: auto          # auto | none | simulated | file | alpaca
+    path: null
+    similarity: 0.5         # Jaccard (après synonymes) pour regrouper les reprises
+    window: 24h
+    activity_half_life: 6h
+  simulated:
+    earnings_every: 24h
+    news_every: 3h
+    duplicate_probability: 0.5
 
 tax:
   # Profil fiscal du pays de résidence (null = pas de fiscalité).

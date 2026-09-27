@@ -35,8 +35,10 @@ erreurs, stress tests de la cible, tests de perturbation), Phase 12 (Decision
 Engine UREBALANCE / UDONOTHING en unités économiques avec coûts et taxes,
 rebalancement partiel, hystérésis, raisons, alertes, journal des décisions),
 Phase 13 (exécution : coûts et impact, fill model, pricer, optimiseur
-d'ordres, paper broker, boucle de feedback et confiance d'exécution) et
-profils fiscaux par pays (TOML, Belgique fournie).
+d'ordres, paper broker, boucle de feedback et confiance d'exécution), Phase 10
+(fondamentaux point-in-time, earnings, guidance, SEC EDGAR, news Alpaca
+dédupliquées en événements) et profils fiscaux par pays (TOML, Belgique
+fournie).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -887,6 +889,29 @@ available_time
 source
 value
 ```
+
+---
+
+## Implémentation
+
+```text
+features/fundamentals.py   store point-in-time : une lecture « as of t » ne voit
+                           que les faits publiés à t (révisions comprises) ;
+                           fund_eps_surprise, fund_eps_growth (YoY),
+                           fund_revenue_growth, fund_guidance_change,
+                           fund_margin_change, qual_score (Σ w·tanh(f), atténué)
+news/news_engine.py        clusters d'articles (même id ou Jaccard après
+                           synonymes financiers) -> news_activity (événements,
+                           pas articles), news_echo, news_hours_since
+data/edgar.py              SEC EDGAR companyfacts ; disponible le lendemain du
+                           dépôt (l'heure d'acceptation n'est pas connue)
+data/alpaca_feed.py        AlpacaNewsFeed : un NewsEvent par symbole cité
+data/merge.py              fusion des sources (par réception, ou concurrente en live)
+```
+
+Sources (`qualitative.*.provider`) : `auto` (simulé seulement si le marché
+est simulé : jamais de fausses news mélangées à un flux réel), `none`,
+`simulated`, `file` (JSONL point-in-time), `edgar`, `alpaca`.
 
 ---
 
@@ -2549,11 +2574,11 @@ Le moteur :
 ## Phase 10 — Qualitative
 
 ```text
-[ ] Fundamental data
-[ ] Earnings events
-[ ] Guidance
-[ ] SEC/filings
-[ ] News feed
+[x] Fundamental data (point-in-time, anti-look-ahead)
+[x] Earnings events (surprise vs consensus)
+[x] Guidance
+[x] SEC/filings (EDGAR companyfacts)
+[x] News feed (Alpaca news, dédupliqué en événements)
 ```
 
 ## Phase 11 — AI

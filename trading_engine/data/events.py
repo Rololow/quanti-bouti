@@ -102,7 +102,15 @@ class BarEvent(MarketEvent):
 
 @dataclass(frozen=True, kw_only=True)
 class NewsEvent(Event):
+    """News brute. `timestamp` = publication, `received_at` = réception.
+    Une news qui cite plusieurs symboles donne un événement par symbole,
+    reliés par le même `news_id`."""
+
     headline: str = ""
+    summary: str = ""
+    url: str = ""
+    news_id: str = ""
+    provider: str = ""            # agence / éditeur (Benzinga, Reuters…)
 
     event_type = EventType.NEWS
 
@@ -111,10 +119,12 @@ class NewsEvent(Event):
 class FundamentalEvent(Event):
     """Donnée fondamentale datée (README §20) : jamais utilisable avant `available_at`."""
 
-    name: str
+    name: str                     # ex. revenue, eps, guidance_eps
     value: float
-    period: str
-    available_at: datetime
+    period: str                   # période concernée, ex. 2026Q1
+    available_at: datetime        # publication : jamais utilisable avant
+    estimate: float | None = None # consensus attendu (earnings surprise)
+    unit: str = ""
 
     event_type = EventType.FUNDAMENTAL
 

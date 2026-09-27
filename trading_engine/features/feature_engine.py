@@ -17,6 +17,12 @@ Noms des features (dictionnaire plat, prêt pour les modèles online) :
     ma_dist_<tf>      distance à la moyenne mobile
     reversal_<tf>     opposé du dernier rendement
     vwap_dist         distance au VWAP de séance
+    fund_* / qual_score   fondamentaux point-in-time (si branchés)
+    news_*            activité news dédupliquée (si branchée)
+
+Les fondamentaux et les news sont lus « as of » l'horloge de marché
+(`now` = dernier timestamp de trade ou de fin de barre) : aucune information
+n'est visible avant sa publication.
 """
 
 from __future__ import annotations
@@ -48,7 +54,12 @@ class FeatureEngine:
         zscore_window: int = 20,
         correlation_timeframes: Iterable[str] | None = None,
         lam: float = 0.94,
+        fundamentals=None,
+        news=None,
     ) -> None:
+        self.fundamentals = fundamentals      # FundamentalFeatures | None
+        self.news = news                      # NewsEngine | None
+        self.now: datetime | None = None      # horloge de marché
         self.timeframes = tuple(timeframes)
         self.zscore_window = zscore_window
         self.mean_reversion_timeframes = tuple(
@@ -82,7 +93,12 @@ class FeatureEngine:
 
     # ---------------------------------------------------------------- updates
 
+    def _tick_clock(self, t: datetime) -> None:
+        if self.now is None or t > self.now:
+            self.now = t
+
     def on_trade(self, trade: TradeEvent) -> None:
+        self._tick_clock(trade.timestamp)
         sym = trade.symbol
         self._last_price[sym] = trade.price
         self._updated_at[sym] = trade.timestamp
@@ -94,6 +110,7 @@ class FeatureEngine:
         # la compter une seconde fois.
         if bar.payload.get("correction"):
             return
+        self._tick_clock(bar.end)
         tf = bar.timeframe
         key = (bar.symbol, tf)
         if key not in self._history:
@@ -160,6 +177,11 @@ class FeatureEngine:
             ):
                 if value is not None:
                     out[name] = value
+
+        if self.fundamentals is not None:
+            out.update(self.fundamentals.snapshot(symbol, self.now))
+        if self.news is not None:
+            out.update(self.news.snapshot(symbol, self.now))
         return out
 
     def correlation(self, timeframe: str) -> tuple[list[str], np.ndarray]:

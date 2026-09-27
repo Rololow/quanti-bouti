@@ -90,6 +90,8 @@ def test_live_and_replay_produce_identical_state(tmp_path, method):
     assert replay.risk_report == live.risk_report
     assert replay.safety.status == live.safety.status
     assert list(replay.decisions) == list(live.decisions)
+    assert replay.fundamentals.store.count == live.fundamentals.store.count > 0
+    assert replay.news.articles == live.news.articles > 0
     assert list(replay.alerts) == list(live.alerts)
     assert live.decisions, "une décision par intervalle"
     assert replay.integrity.counts == live.integrity.counts
