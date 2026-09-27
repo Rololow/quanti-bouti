@@ -103,6 +103,9 @@ Architecture principale :
                     ALLOCATION ENGINE
                               │
                               ▼
+                    CONSTRAINT ENGINE
+                              │
+                              ▼
                        TARGET WEIGHTS
                               │
                               ▼
@@ -153,6 +156,8 @@ SIGNAL
 TARGET WEIGHT
    ↓
 RISK CHECK
+   ↓
+CONSTRAINTS
    ↓
 UREBALANCE / UDONOTHING
    ↓
@@ -1796,6 +1801,35 @@ online learning
 
 Le log historique permet ensuite de reconstruire le comportement passé.
 
+## Event replay : un seul moteur
+
+Un backtest classique (`for day in data: strategy(day)`) ne reproduit ni
+l'ordre des événements, ni l'arrivée des news, ni l'état des modèles online.
+
+Le moteur live et le moteur de validation sont donc **le même code** ; seule
+la source d'événements change :
+
+```text
+                    EVENT SOURCE
+                         │
+              ┌──────────┴──────────┐
+              │                     │
+            LIVE                 REPLAY
+      (Alpaca, simulé)     (journal enregistré)
+              │                     │
+              └──────────┬──────────┘
+                         ▼
+                    SAME ENGINE
+                         │
+                         ▼
+                   SAME DECISIONS
+```
+
+Chaque événement brut reçu en live est écrit dans un journal (JSONL) dans
+l'ordre de réception ; le `ReplayFeed` le relit dans le même ordre. Le moteur
+n'utilise jamais l'heure système dans sa logique : l'horloge est celle des
+événements. Rejouer un journal redonne donc exactement le même état.
+
 ---
 
 # 44. Anti-look-ahead
@@ -1925,7 +1959,206 @@ Cela permet de réduire :
 
 ---
 
-# 49. V1 Development Roadmap
+# 49. Limites et garde-fous
+
+L'architecture empile beaucoup de modèles
+(`data → features → HMM → signals → fusion → risk → allocation → decision → execution`).
+Chaque étage ajoute de l'incertitude : un petit avantage statistique initial
+peut disparaître en bout de chaîne. Les garde-fous suivants font partie du
+design, pas d'une optimisation ultérieure.
+
+## 49.1 Non-stationnarité
+
+Une relation $X_t \rightarrow r_{t+1}$ apprise aujourd'hui peut disparaître
+demain (concept drift, régimes, volatilité, corrélations, microstructure).
+L'apprentissage online peut aussi **apprendre du bruit** et rendre le modèle
+instable. Chaque modèle online doit avoir :
+
+```text
+forgetting factor
+regularization
+minimum sample size
+update frequency
+stability / drift monitoring
+```
+
+## 49.2 Complexité et valeur incrémentale
+
+`complexity ⇏ performance`. Une stratégie de référence
+**momentum simple + volatility targeting** sert de baseline. Chaque module
+peut être désactivé dans la configuration et sa **valeur incrémentale** est
+mesurée en replay contre cette baseline ; un module qui n'apporte rien est
+retiré.
+
+## 49.3 Le HMM est une estimation, pas une vérité
+
+Le HMM fournit une estimation probabiliste d'un état latent, utilisée comme
+feature de régime. Il ne « sait » pas dans quel marché nous sommes.
+
+## 49.4 Double comptage
+
+Earnings surprise, sentiment LLM et momentum peuvent venir **du même
+événement**. Additionner leurs signaux compte trois fois une seule
+information. À gérer :
+
+```text
+event identity
+event clustering
+correlation between signals
+novelty
+information overlap
+```
+
+## 49.5 Le LLM est une source d'incertitude
+
+`JSON valide ≠ information correcte ≠ information utile`. Pipeline de
+validation :
+
+```text
+LLM
+ ↓
+schema validation
+ ↓
+range validation
+ ↓
+source validation
+ ↓
+event deduplication
+ ↓
+confidence
+ ↓
+impact threshold
+```
+
+## 49.6 Stabilité de la cible : hystérésis
+
+Un signal instable fait osciller la cible (15 % → 14 % → 16 % → 13 %).
+`UREBALANCE` n'est envisagé que si
+
+$$
+|w_{target} - w_{current}| > \epsilon
+$$
+
+(`10 % → 10.8 %` : `UDONOTHING` ; `10 % → 15 %` : candidat `UREBALANCE`).
+
+## 49.7 `UREBALANCE` n'est pas une boîte noire
+
+Les décisions restent strictement séparées :
+
+```text
+Decision:    UREBALANCE
+Allocation:  target_weight = 15%
+Execution:   current = 10%, execution_target = 12%
+Order:       quantity, limit price, timing
+```
+
+## 49.8 Confiance du signal ≠ confiance d'exécution
+
+Au départ il n'y a presque aucune donnée d'exécution propriétaire : les
+modèles de fill et de slippage reposent sur des hypothèses. On distingue
+`MODEL CONFIDENCE` et `EXECUTION CONFIDENCE`, pour éviter qu'un signal très
+confiant masque un modèle d'exécution très incertain.
+
+## 49.9 Alpha net et significativité économique
+
+$$
+\alpha_{net} = \alpha_{gross} - C_{spread} - C_{slippage} - C_{impact} - C_{fees} - C_{tax}
+$$
+
+Un alpha de 0.15 % est inutile si l'exécution coûte 0.20 %. Les signaux sont
+donc exprimés **en rendement attendu**, directement comparable aux coûts,
+et pas en score sans unité.
+
+## 49.10 Incertitude explicite
+
+`+2.4 % ± 0.3 %` et `+2.4 % ± 5 %` ne sont pas la même information. Chaque
+prédiction porte une distribution :
+
+$$
+r_{future} \sim \mathcal{D}(\mu, \sigma)
+$$
+
+```python
+Signal(symbol, horizon, mean, std, n_obs, timestamp, source)
+```
+
+## 49.11 Timing
+
+Les données ont des fréquences très différentes (ms pour les ticks, trimestre
+pour les fondamentaux) et arrivent avec des délais. Chaque étape est horodatée :
+
+```text
+event_time
+received_time
+processing_time
+decision_time
+execution_time
+```
+
+pour ne jamais utiliser une information qu'on n'aurait pas eue au moment de
+la décision.
+
+## 49.12 Le portefeuille est un système couplé
+
+Modifier une position change le risque de tout le portefeuille
+($\sigma_p=\sqrt{w^T\Sigma w}$). Quatre signaux excellents sur des actifs
+exposés au même facteur ne font pas quatre paris. L'allocation reste
+**portfolio-level**.
+
+## 49.13 Attribution
+
+Le système doit pouvoir expliquer chaque changement de cible :
+
+```text
+MSFT target 8% → 11%
+
++2.1%  medium-term momentum
++1.2%  earnings revision
++0.8%  regime
+-0.6%  portfolio concentration
+-0.4%  volatility
+-0.2%  correlation
+--------------------------------
++2.9%
+```
+
+La cible est donc construite comme une somme de contributions traçables.
+
+## 49.14 Feedback loops
+
+`signal → trade → mouvement de prix → nouveau signal` : le système peut
+réagir à ses propres actions. Les données d'apprentissage distinguent le
+mouvement dû au marché du mouvement induit par l'exécution.
+
+## 49.15 Constraint Engine
+
+Entre allocation et décision, un module explicite rend la cible réalisable :
+
+```text
+max position
+max sector exposure
+max turnover
+max leverage
+min cash
+max tracking error
+max portfolio volatility
+max execution participation
+tax constraints
+```
+
+## 49.16 Priorités
+
+| Priorité | Problème                         | Solution                                        |
+| -------- | -------------------------------- | ----------------------------------------------- |
+| 1        | Non-stationnarité                | drift detection + forgetting + model monitoring |
+| 2        | Overfitting / complexité         | ablation + valeur incrémentale                  |
+| 3        | Double comptage                  | event clustering + corrélation des signaux      |
+| 4        | Incertitude d'exécution          | modèles fill / slippage + confidence            |
+| 5        | Validation realtime              | event replay engine                             |
+
+---
+
+# 50. V1 Development Roadmap
 
 ## Phase 1 — Core
 
@@ -1960,16 +2193,29 @@ Cela permet de réduire :
 [x] Correlation
 ```
 
-## Phase 4 — Online Models
+## Phase 4 — Replay & Storage
 
 ```text
+[ ] Event log (journal JSONL des événements bruts)
+[ ] ReplayFeed (même moteur, source rejouée)
+[ ] Replay déterministe (live == replay)
+[ ] Baseline : momentum + volatility targeting
+[ ] Interrupteurs de modules (ablation)
+```
+
+## Phase 5 — Online Models
+
+```text
+[ ] Signal = rendement attendu ± incertitude
 [ ] HMM-HF
 [ ] HMM-MT
 [ ] HMM-LT
 [ ] Online factor model
+[ ] Forgetting / regularization / minimum sample size
+[ ] Stability & drift monitoring
 ```
 
-## Phase 5 — Risk
+## Phase 6 — Risk
 
 ```text
 [ ] Portfolio volatility
@@ -1980,17 +2226,19 @@ Cela permet de réduire :
 [ ] Limits
 ```
 
-## Phase 6 — Allocation
+## Phase 7 — Allocation & Constraints
 
 ```text
 [ ] Signal → target weight
 [ ] Volatility targeting
 [ ] Risk parity
 [ ] HRP
+[ ] Constraint engine
+[ ] Target attribution
 [ ] Drift monitoring
 ```
 
-## Phase 7 — Qualitative
+## Phase 8 — Qualitative
 
 ```text
 [ ] Fundamental data
@@ -2000,7 +2248,7 @@ Cela permet de réduire :
 [ ] News feed
 ```
 
-## Phase 8 — AI
+## Phase 9 — AI
 
 ```text
 [ ] Structured output schema
@@ -2010,32 +2258,36 @@ Cela permet de réduire :
 [ ] Novelty
 [ ] Confidence
 [ ] Fundamental extraction
+[ ] Validation pipeline (schema, range, source)
+[ ] Event deduplication / clustering
 ```
 
-## Phase 9 — Decision Engine
+## Phase 10 — Decision Engine
 
 ```text
-[ ] Signal fusion
+[ ] Signal fusion (sans double comptage)
 [ ] Risk checks
-[ ] U_rebalance vs U_donothing
+[ ] Hystérésis
+[ ] U_rebalance vs U_donothing (alpha net)
 [ ] Partial rebalance (execution weight, urgency)
 [ ] Reason generation
 [ ] Alerts
 ```
 
-## Phase 10 — Execution
+## Phase 11 — Execution
 
 ```text
 [ ] Cost model (spread, slippage, fees)
 [ ] Impact model / participation
 [ ] Fill model
+[ ] Execution confidence
 [ ] Order pricer
 [ ] Order optimizer
 [ ] Order proposals
 [ ] Execution feedback loop
 ```
 
-## Phase 11 — Dashboard
+## Phase 12 — Dashboard
 
 ```text
 [ ] Portfolio overview
@@ -2050,7 +2302,7 @@ Cela permet de réduire :
 
 ---
 
-# 50. Final target architecture
+# 51. Final target architecture
 
 ```text
                            ┌───────────────────────┐
@@ -2098,6 +2350,9 @@ Cela permet de réduire :
                     ALLOCATION ENGINE
                             │
                             ▼
+                    CONSTRAINT ENGINE
+                            │
+                            ▼
                     DECISION ENGINE
                             │
                   ┌─────────┴─────────┐
@@ -2119,7 +2374,7 @@ Cela permet de réduire :
 
 ---
 
-# 51. Design principles
+# 52. Design principles
 
 Le projet doit respecter les principes suivants :
 
@@ -2141,10 +2396,13 @@ Le projet doit respecter les principes suivants :
 16. **No BUY / SELL: only UREBALANCE or UDONOTHING**
 17. **Deciding to rebalance and deciding how to execute are separate problems**
 18. **Alpha and execution are learned by two separate loops**
+19. **Live and replay run the exact same engine**
+20. **Signals are expected returns with uncertainty, compared to costs**
+21. **Every module must prove its incremental value against a simple baseline**
 
 ---
 
-# 52. First implementation milestone
+# 53. First implementation milestone
 
 La première milestone concrète est volontairement petite :
 

@@ -1,4 +1,4 @@
-"""Assemblage de la boucle principale (README §40, milestone §52 — partie Core).
+"""Assemblage de la boucle principale (README §40, milestone §53 — partie Core).
 
     Feed → EventBus → MarketState / BarBuilder / FeatureEngine / Portfolio → console
 """
