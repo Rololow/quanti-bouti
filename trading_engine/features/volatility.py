@@ -23,7 +23,7 @@ class EWMAVolatility:
             raise ValueError(f"lambda must be in (0, 1), got {self.lam}")
 
     def seed(self, prices: list[float]) -> None:
-        """Initialise l'état depuis un petit historique (README §42)."""
+        """Initialise l'état depuis un petit historique (README §45)."""
         for price in prices:
             self.update(price)
 

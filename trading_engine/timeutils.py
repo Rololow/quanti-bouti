@@ -36,3 +36,11 @@ def floor_time(ts: datetime, step: timedelta) -> datetime:
     """Arrondit `ts` au début de l'intervalle `step` (aligné sur l'epoch UTC)."""
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     return epoch + ((ensure_utc(ts) - epoch) // step) * step
+
+
+def parse_rfc3339(value: str) -> datetime:
+    """Parse un timestamp RFC 3339 (ex. Alpaca, précision nanoseconde).
+
+    Les chiffres au-delà de la microseconde sont tronqués.
+    """
+    return ensure_utc(datetime.fromisoformat(value))

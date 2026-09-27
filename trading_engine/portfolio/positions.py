@@ -1,4 +1,4 @@
-"""Positions (README §14, §35)."""
+"""Positions (README §14, §38)."""
 
 from __future__ import annotations
 

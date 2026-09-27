@@ -16,8 +16,9 @@ def _fmt(value: float | None, spec: str) -> str:
 
 
 def print_state(state: PortfolioState) -> None:
+    ts = "-" if state.timestamp is None else f"{state.timestamp:%Y-%m-%d %H:%M:%S}"
     print(
-        f"\n[{state.timestamp:%Y-%m-%d %H:%M:%S}] "
+        f"\n[{ts}] "
         f"value={state.total_value:,.2f} cash={state.cash:,.2f} "
         f"uPnL={state.unrealized_pnl:+,.2f} leverage={state.leverage:.2f}"
     )
@@ -31,13 +32,48 @@ def print_state(state: PortfolioState) -> None:
         )
 
 
+def print_features(engine: Engine) -> None:
+    shown = ("mom_5m", "mom_30m", "mom_1h", "mom_1d", "z_5m", "vwap_dist")
+    print(f"  {'features':<8} " + " ".join(f"{name:>9}" for name in shown))
+    for sym in engine.features.symbols():
+        feats = engine.features.snapshot(sym)
+        print(f"  {sym:<8} " + " ".join(f"{_fmt(feats.get(name), '+.3f'):>9}" for name in shown))
+    for tf in engine.config.features.correlation_timeframes or engine.config.bar_timeframes:
+        if engine.features.correlation_updates(tf) < 2:
+            continue
+        symbols, corr = engine.features.correlation(tf)
+        pairs = [
+            f"{symbols[i]}/{symbols[j]} {corr[i, j]:+.2f}"
+            for i in range(len(symbols)) for j in range(i + 1, len(symbols))
+        ]
+        print(f"  corr {tf}: " + "  ".join(pairs))
+
+
+def print_feed_status(engine: Engine) -> None:
+    status = getattr(engine.feed, "status", None)
+    if status is None:
+        return
+    latency = "-" if status.last_latency is None else f"{status.last_latency.total_seconds() * 1000:.0f}ms"
+    print(f"  feed: connected={status.connected} reconnects={status.reconnect_count} "
+          f"messages={status.messages_received} latency={latency} last_error={status.last_error}")
+
+
 async def _run(config_path: str) -> None:
-    engine = Engine(load_config(config_path), reporter=print_state)
-    final = await engine.run()
+    engine: Engine
+
+    def report(state: PortfolioState) -> None:
+        print_state(state)
+        print_features(engine)
+        print_feed_status(engine)
+
+    engine = Engine(load_config(config_path), reporter=report)
+    try:
+        final = await engine.run()
+    finally:
+        print(f"\nevents={engine.bus.published_count} bars={len(engine.bars)} "
+              f"handler_errors={engine.bus.error_count}")
     print("\n=== final ===")
-    print_state(final)
-    print(f"\nevents={engine.bus.published_count} bars={len(engine.bars)} "
-          f"handler_errors={engine.bus.error_count}")
+    report(final)
 
 
 def main() -> None:
@@ -45,7 +81,10 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    asyncio.run(_run(args.config))
+    try:
+        asyncio.run(_run(args.config))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

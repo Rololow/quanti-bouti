@@ -2,20 +2,60 @@
 
 engine:
   # Nombre d'événements traités avant l'arrêt (null = infini).
-  max_events: 2000
+  max_events: 20000
   # Affichage console toutes les N trades.
-  report_every: 250
+  report_every: 5000
 
 feed:
-  # "simulated" pour l'instant ; "alpaca" arrivera en Phase 2.
+  # "simulated" (flux déterministe, sans clé), "alpaca" (temps réel) ou
+  # "replay" (rejoue le journal replay_path avec exactement le même moteur).
+  # Alpaca lit ses clés dans APCA_API_KEY_ID / APCA_API_SECRET_KEY.
   provider: simulated
+  replay_path: data/events.jsonl
   symbols: [SPY, QQQ, TLT, GLD]
   seed: 42
   # Intervalle entre deux trades simulés (secondes de temps de marché).
-  tick_seconds: 1.0
+  tick_seconds: 5.0
+  alpaca:
+    # "iex" (plan gratuit) ou "sip" (plan payant). url permet de forcer un
+    # autre endpoint, ex. wss://stream.data.alpaca.markets/v2/test.
+    data_feed: iex
+    trades: true
+    quotes: false   # très volumineux en SIP
+    bars: true      # barres 1 minute Alpaca
+    heartbeat_interval: 20   # ping après N s sans message
+    heartbeat_timeout: 10    # reconnexion si pas de pong
+    backoff_initial: 1
+    backoff_max: 60
 
 bars:
   timeframes: [5m, 1h, 1d]
+
+features:
+  # Horizons de momentum ; chacun est calculé sur la plus longue barre qui le
+  # divise (30m = 6 barres 5m, 20d = 20 barres 1d).
+  momentum_horizons: [5m, 30m, 1h, 1d, 20d, 60d, 252d]
+  mean_reversion_timeframes: [5m]
+  zscore_window: 20
+  # null = tous les timeframes de barres
+  correlation_timeframes: [5m, 1h, 1d]
+
+allocation:
+  # Interrupteur d'ablation : "static" (portfolio.target_weights) ou
+  # "baseline" (momentum + volatility targeting, la référence à battre).
+  method: static
+  # Recalcul de la cible à chaque clôture de barre de ce timeframe.
+  rebalance_timeframe: 1h
+  baseline:
+    momentum_horizon: 1h
+    vol_timeframe: 1h
+    target_vol: 0.10     # volatilité annualisée cible du portefeuille
+    budget: 1.0          # fraction maximale investie
+    max_weight: 0.40
+
+storage:
+  # Journal JSONL des événements bruts reçus (null = désactivé). Sert au replay.
+  event_log: null
 
 volatility:
   # Facteur de décroissance EWMA (RiskMetrics : 0.94 en daily).
