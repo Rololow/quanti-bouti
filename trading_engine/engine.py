@@ -12,6 +12,7 @@ from typing import Callable
 
 import numpy as np
 
+from trading_engine.alerts.alerts import Alert, AlertEngine
 from trading_engine.allocation.allocator import RiskAllocator
 from trading_engine.allocation.baseline import BaselineAllocator
 from trading_engine.allocation.constraints import ConstraintEngine
@@ -22,7 +23,16 @@ from trading_engine.data.alpaca_feed import AlpacaMarketFeed
 from trading_engine.data.bar_builder import BarBuilder
 from trading_engine.data.event_bus import EventBus
 from trading_engine.data.integrity import REJECT, DataIntegrity, DataIssue
-from trading_engine.data.events import BarEvent, EventType, QuoteEvent, RiskEvent, TradeEvent
+from trading_engine.data.events import (
+    AlertEvent,
+    BarEvent,
+    DecisionEvent,
+    EventType,
+    QuoteEvent,
+    RiskEvent,
+    TradeEvent,
+)
+from trading_engine.decision.rebalance import Decision, DecisionContext, DecisionEngine
 from trading_engine.data.market_feed import MarketFeed, SimulatedMarketFeed
 from trading_engine.data.market_state import MarketStateStore
 from trading_engine.data.replay_feed import ReplayFeed
@@ -35,6 +45,7 @@ from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
 from trading_engine.robustness.stress import StressReport, stress_test
 from trading_engine.safety.safety_engine import SafetyEngine, SafetyState, SafetyStatus
+from trading_engine.storage.decision_log import DecisionLogWriter
 from trading_engine.storage.event_log import EventLogWriter
 from trading_engine.tax.profile import load_tax_profile
 from trading_engine.tax.tax_model import RebalanceTaxCost, TaxModel
@@ -91,6 +102,14 @@ class Engine:
         self.drift = DriftMonitor(config.risk.limits.max_drift)
         self.last_allocation: TargetAllocation | None = None
         self.last_stress: StressReport | None = None
+        self.decision_engine = DecisionEngine(config.decision, self.tax)
+        self.last_decision: Decision | None = None
+        self.decisions: deque[Decision] = deque(maxlen=500)
+        self.alert_engine = AlertEngine(config.alerts)
+        self.alerts: deque[Alert] = deque(maxlen=500)
+        self.decision_log = (
+            DecisionLogWriter(config.storage.decision_log) if config.storage.decision_log else None
+        )
         self.risk_report: RiskReport | None = None
         self._active_breaches: frozenset[str] = frozenset()
         self._interval_due = False
@@ -214,6 +233,90 @@ class Engine:
         status = self.evaluate_safety()
         if self.config.allocation.method != "static" and status.can_decide:
             self._reallocate(status)
+        decision = None
+        if self.config.decision.enabled:
+            decision = self.decide(status)
+            await self._publish_decision(decision)
+        await self._publish_alerts(status, decision)
+
+    def decision_context(self, status: SafetyStatus) -> DecisionContext:
+        state = self._raw_snapshot()
+        symbols = self.universe()
+        spreads = {}
+        for sym in symbols:
+            ms = self.market_state.get(sym)
+            if ms is not None and ms.spread is not None and ms.bid and ms.ask:
+                spreads[sym] = ms.spread / ((ms.bid + ms.ask) / 2)
+        ens = self.models.ensemble
+        return DecisionContext(
+            timestamp=state.timestamp,
+            portfolio_value=state.total_value,
+            current={p.symbol: p.weight for p in state.positions},
+            target=dict(self.portfolio.target_weights) or None,
+            symbols=symbols,
+            cov=self.risk.covariance(symbols),
+            prices={p.symbol: p.price for p in state.positions},
+            spreads=spreads,
+            signals={s: next(iter(self.models.signals(s)), None) for s in symbols},
+            safety_state=status.state.value,
+            frozen=status.frozen_symbols,
+            data_scores=self.integrity.scores(),
+            robustness=None if self.last_allocation is None else self.last_allocation.robustness,
+            portfolio_risk=None if self.risk_report is None else self.risk_report.portfolio_vol,
+            model_agreement=None if ens is None else ens.effective_models() / len(ens.names),
+        )
+
+    def decide(self, status: SafetyStatus) -> Decision:
+        decision = self.decision_engine.decide(self.decision_context(status))
+        self.last_decision = decision
+        self.decisions.append(decision)
+        if self.decision_log is not None:
+            self.decision_log.write(decision)
+        return decision
+
+    async def _publish_decision(self, decision: Decision) -> None:
+        if decision.timestamp is None:
+            return
+        await self.bus.publish(DecisionEvent(
+            timestamp=decision.timestamp, received_at=decision.timestamp, symbol=None,
+            source="decision_engine",
+            payload={
+                "decision_id": decision.decision_id,
+                "action": decision.action,
+                "fraction": decision.fraction,
+                "execution_weights": decision.execution_weights,
+                "net_benefit": decision.net_benefit,
+                "reasons": list(decision.reasons),
+            },
+        ))
+
+    async def _publish_alerts(self, status: SafetyStatus, decision: Decision | None) -> None:
+        symbols = self.universe()
+        cfg = self.config.alerts
+        vols = {s: (self.features.volatility.get(s, cfg.vol_fast),
+                    self.features.volatility.get(s, cfg.vol_slow)) for s in symbols}
+        corr = None
+        tf = cfg.correlation_timeframe
+        if tf in self.features.covariance_timeframes and self.features.correlation_updates(tf) >= 2:
+            corr = self.features.correlation(tf)[1]
+        alerts = self.alert_engine.evaluate(
+            status.timestamp,
+            breaches=list(self.risk_report.breaches) if self.risk_report else [],
+            volatilities=vols,
+            correlation=corr,
+            regimes={s: self.models.regimes(s) for s in symbols},
+            signals={s: next(iter(self.models.signals(s)), None) for s in symbols},
+            safety_state=status.state.value,
+            decision=decision,
+        )
+        for alert in alerts:
+            self.alerts.append(alert)
+            if alert.timestamp is not None:
+                await self.bus.publish(AlertEvent(
+                    timestamp=alert.timestamp, received_at=alert.timestamp, symbol=alert.symbol,
+                    source="alert_engine", kind=alert.kind, severity=alert.severity,
+                    message=alert.message,
+                ))
 
     def evaluate_safety(self) -> SafetyStatus:
         now = self.integrity.last_event_time
@@ -337,4 +440,6 @@ class Engine:
         finally:
             if self.recorder is not None:
                 self.recorder.close()
+            if self.decision_log is not None:
+                self.decision_log.close()
         return self.snapshot()

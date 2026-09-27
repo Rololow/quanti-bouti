@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import IO, Any, Iterator
 
 from trading_engine.data.events import (
+    AlertEvent,
     BarEvent,
     DecisionEvent,
     Event,
@@ -33,7 +34,7 @@ EVENT_CLASSES: dict[str, type[Event]] = {
     cls.__name__: cls
     for cls in (
         MarketEvent, TradeEvent, QuoteEvent, BarEvent, NewsEvent, FundamentalEvent,
-        PortfolioEvent, RiskEvent, DecisionEvent,
+        PortfolioEvent, RiskEvent, DecisionEvent, AlertEvent,
     )
 }
 

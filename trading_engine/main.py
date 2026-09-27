@@ -69,6 +69,36 @@ def print_tax(engine: Engine) -> None:
           f"({cost.total / value:.3%} du portefeuille)")
 
 
+def print_decision(engine: Engine) -> None:
+    d = engine.last_decision
+    if d is None:
+        return
+    c = d.costs
+    print(f"  DECISION {d.decision_id}: {d.action}"
+          + (f" à {d.fraction:.0%} du chemin" if d.action == "UREBALANCE" else "")
+          + f" | net {d.net_benefit:+.2f} = risque {d.risk_benefit:+.2f} + alpha {d.alpha_benefit:+.2f}"
+          f" - coûts {c.total:.2f} - k·σ ({d.uncertainty:.2f}) | urgence {d.urgency:.2f}")
+    print(f"    diagnostics: TE={_fmt(d.tracking_error, '.2%')} modèles eff.={_fmt(d.model_agreement, '.2f')} "
+          f"fiabilité={_fmt(d.model_reliability, '.2f')} données={_fmt(d.data_quality, '.2f')} "
+          f"robustesse={_fmt(d.robustness, '.2f')} safety={d.safety_state}")
+    for reason in d.reasons:
+        print(f"    - {reason}")
+    if d.action == "UREBALANCE":
+        for sym, sd in sorted(d.symbols.items()):
+            if abs(sd.notional) > 0:
+                print(f"    {sym:<6} {sd.current_weight:6.1%} → {sd.execution_weight:6.1%} "
+                      f"(cible {sd.target_weight:.1%}) {sd.notional:+,.0f}")
+
+
+def print_alerts(engine: Engine, last: int = 5) -> None:
+    recent = list(engine.alerts)[-last:]
+    if recent:
+        print(f"  alertes récentes ({len(engine.alerts)} au total) :")
+        for a in recent:
+            ts = "-" if a.timestamp is None else f"{a.timestamp:%m-%d %H:%M}"
+            print(f"    [{ts}] {a.severity.upper():<8} {a.kind:<20} {a.symbol or '':<5} {a.message}")
+
+
 def print_allocation(engine: Engine) -> None:
     alloc = engine.last_allocation
     if alloc is None:
@@ -155,6 +185,8 @@ async def _run(config_path: str) -> None:
         print_risk(engine)
         print_safety(engine)
         print_tax(engine)
+        print_decision(engine)
+        print_alerts(engine)
         print_allocation(engine)
         print_feed_status(engine)
 

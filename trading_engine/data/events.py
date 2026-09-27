@@ -29,6 +29,7 @@ class EventType(str, Enum):
     PORTFOLIO = "portfolio"
     RISK = "risk"
     DECISION = "decision"
+    ALERT = "alert"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -138,3 +139,12 @@ class RiskEvent(Event):
 @dataclass(frozen=True, kw_only=True)
 class DecisionEvent(Event):
     event_type = EventType.DECISION
+
+
+@dataclass(frozen=True, kw_only=True)
+class AlertEvent(Event):
+    kind: str
+    severity: str = "info"            # info | warning | critical
+    message: str = ""
+
+    event_type = EventType.ALERT

@@ -31,8 +31,10 @@ attribution de la cible, drift monitoring), Phase 8 (Data Integrity avec
 quarantaine des sauts non confirmés, Safety Engine NORMAL / DEGRADED / HALTED,
 hard controls indépendants des modèles), Phase 9 (MODEL_DEGRADED des HMM,
 fiabilité des prédicteurs par régime, ensemble pondéré par la corrélation des
-erreurs, stress tests de la cible, tests de perturbation) et profils fiscaux
-par pays (TOML, Belgique fournie).
+erreurs, stress tests de la cible, tests de perturbation), Phase 12 (Decision
+Engine UREBALANCE / UDONOTHING en unités économiques avec coûts et taxes,
+rebalancement partiel, hystérésis, raisons, alertes, journal des décisions) et
+profils fiscaux par pays (TOML, Belgique fournie).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -1264,6 +1266,30 @@ UREBALANCE & \text{si bénéfice > coût} \\
 UDONOTHING & \text{sinon}
 \end{cases}
 $$
+
+### Implémentation (`decision/rebalance.py`)
+
+Tout est exprimé dans la devise du portefeuille (V = valeur) :
+
+```text
+TE²(w)     = (w - w_target)' Σ (w - w_target)                 écart de risque à la cible
+risque(f)  = V · γ/2 · H · [TE²(w_courant) - TE²(w_f)]        H = période de détention
+alpha(f)   = V · Σ Δw_i · μ_i · fiabilité_i                    rendement attendu, pondéré
+coûts(f)   = spread + slippage + commissions + TOB + impôt sur plus-values
+σ(f)       = sqrt(σ_alpha² + ((1 - robustesse) · risque(f))²)
+net(f)     = risque(f) + alpha(f) - coûts(f) - k · σ(f)
+```
+
+avec $w_f = w_c + f\,(w_{target} - w_c)$ pour plusieurs fractions $f$ : le
+rebalancement partiel **émerge des coûts** (bénéfice concave, coûts
+linéaires). σ_alpha est l'incertitude sur l'**estimation** de μ (erreur-type
+et désaccord des modèles), pas le bruit du rendement, déjà compté dans le
+terme de risque.
+
+Filtres avant tout calcul : HALTED, cible absente ou non robuste, symboles
+gelés ou aux données dégradées, bande de non-trading (hystérésis).
+`UDONOTHING` garde l'évaluation de la meilleure option rejetée
+(`evaluated_fraction`) pour expliquer pourquoi elle ne valait pas son coût.
 
 ---
 
@@ -2522,16 +2548,17 @@ Le moteur :
 ## Phase 12 — Decision Engine
 
 ```text
-[ ] Signal fusion (sans double comptage)
-[ ] Risk checks
-[ ] Hystérésis
+[x] Signal fusion (ensemble, sans double comptage des modèles)
+[x] Risk checks
+[x] Hystérésis (bande de non-trading)
 [x] Profils fiscaux par pays (TOML) — Belgique
-[ ] Coût fiscal dans U_rebalance
-[ ] U_rebalance vs U_donothing (alpha net, k · σ effectif)
-[ ] Filtres : data quality, safety state, stress tests
-[ ] Partial rebalance (execution weight, urgency)
-[ ] Reason generation
-[ ] Alerts
+[x] Coût fiscal dans U_rebalance
+[x] U_rebalance vs U_donothing (alpha net, k · σ effectif)
+[x] Filtres : data quality, safety state, stress tests
+[x] Partial rebalance (execution weight, urgency)
+[x] Reason generation
+[x] Alerts
+[x] Journal des décisions
 ```
 
 ## Phase 13 — Execution

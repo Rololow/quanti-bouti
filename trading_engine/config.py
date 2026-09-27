@@ -9,7 +9,9 @@ from typing import Any, Mapping
 
 import yaml
 
+from trading_engine.alerts.alerts import AlertConfig
 from trading_engine.allocation.constraints import Constraints
+from trading_engine.decision.rebalance import DecisionConfig
 from trading_engine.data.integrity import IntegrityConfig
 from trading_engine.execution.hard_controls import HardLimits
 from trading_engine.safety.safety_engine import SafetyConfig
@@ -161,6 +163,7 @@ class ModelsConfig:
 @dataclass(frozen=True)
 class StorageConfig:
     event_log: str | None = None
+    decision_log: str | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +196,8 @@ class Config:
     hard_controls: HardLimits = field(default_factory=HardLimits)
     tax: TaxConfig = field(default_factory=TaxConfig)
     robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
+    decision: DecisionConfig = field(default_factory=DecisionConfig)
+    alerts: AlertConfig = field(default_factory=AlertConfig)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -274,10 +279,19 @@ class Config:
             hard_controls=HardLimits(**(raw.get("hard_controls") or {})),
             tax=TaxConfig(**(raw.get("tax") or {})),
             robustness=RobustnessConfig(**(raw.get("robustness") or {})),
+            decision=DecisionConfig(**{
+                k: tuple(v) if k == "fractions" else v
+                for k, v in (raw.get("decision") or {}).items()
+            }),
+            alerts=AlertConfig(**{
+                k: tuple(v) if k == "regime_horizons" else v
+                for k, v in (raw.get("alerts") or {}).items()
+            }),
             instruments={
                 sym: Instrument(sym, **spec) for sym, spec in (raw.get("instruments") or {}).items()
             },
-            storage=StorageConfig(event_log=storage.get("event_log")),
+            storage=StorageConfig(event_log=storage.get("event_log"),
+                                  decision_log=storage.get("decision_log")),
             models=ModelsConfig(
                 regimes=RegimesConfig(**(models.get("regimes") or {})),
                 predictors=tuple(predictors),

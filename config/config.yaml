@@ -59,7 +59,9 @@ allocation:
     max_gross: 1.0
     min_cash: 0.02
     max_portfolio_vol: 0.15
-    max_turnover: 0.50   # par rebalancement (somme des |variations de poids|)
+    # Turnover par rebalancement : null = la cible reste la cible idéale, la
+    # trajectoire (rebalancement partiel) est décidée par le Decision Engine.
+    max_turnover: null
     sectors: {SPY: equity, QQQ: equity, TLT: bonds, GLD: commodities}
     sector_limits: {equity: 0.60}
   baseline:
@@ -113,6 +115,33 @@ risk:
     max_risk_contribution: 0.50
     max_position_drawdown: 0.25
     max_drift: 0.05
+
+decision:
+  # UREBALANCE si bénéfice (risque + alpha) - coûts - k·σ > min_net_benefit
+  enabled: true
+  risk_aversion: 5.0        # γ : valeur d'une réduction de l'écart de risque à la cible
+  holding_period: 5d        # horizon sur lequel cet écart est valorisé
+  k_sigma: 1.0              # marge exigée par rapport à l'incertitude
+  no_trade_band: 0.02       # hystérésis : |cible - poids| < 2 % -> on ne touche pas
+  fractions: [0.25, 0.5, 1.0]   # rebalancement partiel : part du chemin évaluée
+  min_net_benefit: 0.0
+  default_spread_bps: 5.0   # si aucune quote disponible
+  slippage_bps: 2.0
+  commission_per_order: 0.0 # Alpaca : 0
+  min_robustness: 0.3       # stress tests : en dessous, cible jugée non fiable
+  min_data_score: 0.9
+  include_alpha: true
+
+alerts:
+  vol_fast: 5m
+  vol_slow: 1h
+  vol_spike_ratio: 2.0
+  correlation_timeframe: 1h
+  correlation_jump: 0.3
+  reversal_t: 0.5
+  disagreement_share: 0.5
+  regime_horizons: [MT, LT]    # les régimes HF basculent souvent : pas d'alerte
+  regime_min_confidence: 0.8
 
 robustness:
   # Stress tests de la cible à chaque rebalancement (vol d'un actif ×1.5,
@@ -172,6 +201,8 @@ instruments:
 storage:
   # Journal JSONL des événements bruts reçus (null = désactivé). Sert au replay.
   event_log: null
+  # Journal JSONL des décisions avec tous leurs diagnostics (null = désactivé).
+  decision_log: null
 
 volatility:
   # Facteur de décroissance EWMA (RiskMetrics : 0.94 en daily).
