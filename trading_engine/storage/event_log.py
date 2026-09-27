@@ -19,6 +19,7 @@ from typing import IO, Any, Iterator
 from trading_engine.data.events import (
     AlertEvent,
     BarEvent,
+    CalendarEvent,
     DecisionEvent,
     Event,
     FundamentalEvent,
@@ -37,6 +38,7 @@ EVENT_CLASSES: dict[str, type[Event]] = {
     for cls in (
         MarketEvent, TradeEvent, QuoteEvent, BarEvent, NewsEvent, FundamentalEvent,
         PortfolioEvent, RiskEvent, DecisionEvent, AlertEvent, NewsAnalysisEvent, OrderUpdateEvent,
+        CalendarEvent,
     )
 }
 

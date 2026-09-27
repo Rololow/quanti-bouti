@@ -363,6 +363,8 @@ function renderHeader(st) {
     ["heure marché", time(m.now)], ["flux", m.feed], ["allocation", m.allocation_method],
     ["exécution", m.execution_mode], ["événements", (m.events || 0).toLocaleString("fr-BE")],
   ];
+  if (m.market) chips.push(["marché", m.market.open
+    ? `ouvert (clôture ${time(m.market.close)})` : `fermé (ouverture ${time(m.market.next_open)})`]);
   if (st.__embedded) chips.push(["mode", "export statique"]);
   replace("meta", ...chips.map(([k, v]) => el("span", { class: "chip" }, `${k} : ${v}`)),
     safety.reasons.length ? el("span", { class: "chip" }, safety.reasons.join(" · ")) : null);

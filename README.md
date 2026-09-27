@@ -132,6 +132,17 @@ Tout ce qui vient d'Alpaca (historique, état du compte, mises à jour d'ordres)
 est enregistré dans le journal : `feed.provider: replay` avec
 `execution.mode: alpaca_paper` rejoue la session à l'identique, sans broker.
 
+### Calendrier de marché
+
+Avec le flux Alpaca, le moteur charge les séances officielles (`/v2/calendar`,
+règles NYSE en repli : fériés, jours observés, clôtures à 13h00 les veilles de
+fête). Hors séance, dans les 5 premières minutes et les 15 dernières, la
+décision est UDONOTHING avec la raison ; la durée des ordres est plafonnée à la
+clôture ; la fraîcheur des données se compte depuis l'ouverture (pas d'alerte
+la nuit ni le week-end). Le calendrier est journalisé (`CalendarEvent`) : le
+replay utilise les mêmes séances. `calendar.mode: on` l'active aussi en
+simulation, `off` le désactive.
+
 Limites : marché US ouvert (15h30-22h00 heure de Bruxelles) ; horloge système
 synchronisée (NTP) ; le flux `iex` ne couvre qu'une partie du volume, les
 estimations de participation sont donc prudentes.
@@ -2742,6 +2753,7 @@ Le moteur :
 [x] Broker Alpaca paper (ordres + trade_updates, verrouillé sur l'hôte paper)
 [x] Synchronisation et rapprochement du compte broker
 [x] Warm-up historique (barres Alpaca REST au démarrage)
+[x] Calendrier de marché (séances, fériés, clôtures anticipées)
 ```
 
 ## Phase 14 — Dashboard

@@ -255,6 +255,24 @@ class AISettings:
 
 
 @dataclass(frozen=True)
+class CalendarConfig:
+    """Séances de marché. `auto` : actif avec le flux Alpaca (calendrier
+    Alpaca, règles NYSE en repli), inactif en simulation ; en replay, le
+    calendrier vient du journal. `on` : règles NYSE hors Alpaca. `off` : 24/7."""
+
+    mode: str = "auto"
+    avoid_open_minutes: float = 5.0      # pas de décision juste après l'ouverture
+    avoid_close_minutes: float = 15.0    # ni juste avant la clôture
+    horizon_days: int = 30               # période chargée (renouvelée en live)
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("auto", "on", "off"):
+            raise ValueError(f"calendar.mode must be auto|on|off, got {self.mode!r}")
+        if self.avoid_open_minutes < 0 or self.avoid_close_minutes < 0 or self.horizon_days < 1:
+            raise ValueError("calendar: minutes must be >= 0 and horizon_days >= 1")
+
+
+@dataclass(frozen=True)
 class WarmupConfig:
     """Historique chargé au démarrage (flux Alpaca) : jours calendaires par timeframe."""
 
@@ -292,6 +310,7 @@ class Config:
     qualitative: QualitativeConfig = field(default_factory=QualitativeConfig)
     ai: AISettings = field(default_factory=AISettings)
     warmup: WarmupConfig = field(default_factory=WarmupConfig)
+    calendar: CalendarConfig = field(default_factory=CalendarConfig)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -383,6 +402,7 @@ class Config:
             qualitative=_qualitative_config(raw.get("qualitative") or {}),
             ai=AISettings(**(raw.get("ai") or {})),
             warmup=WarmupConfig(**(raw.get("warmup") or {})),
+            calendar=CalendarConfig(**(raw.get("calendar") or {})),
             alerts=AlertConfig(**{
                 k: tuple(v) if k == "regime_horizons" else v
                 for k, v in (raw.get("alerts") or {}).items()

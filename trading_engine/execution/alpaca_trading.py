@@ -24,10 +24,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any, AsyncIterator, Callable, Mapping
 
 from trading_engine.data.alpaca_feed import KEY_ENV, SECRET_ENV
+from trading_engine.data.calendar import MarketCalendar, Session
 from trading_engine.data.events import OrderUpdateEvent
 from trading_engine.data.market_feed import MarketFeed
 from trading_engine.execution.orders import OrderProposal
@@ -142,6 +143,16 @@ class AlpacaTradingClient:
 
     def cancel_order(self, broker_order_id: str) -> None:
         self._call("DELETE", f"/v2/orders/{broker_order_id}")
+
+    def calendar(self, start: date, end: date) -> MarketCalendar:
+        """Séances officielles (heures locales New York) entre deux dates incluses."""
+        rows = self._call("GET", f"/v2/calendar?start={start.isoformat()}&end={end.isoformat()}") or []
+        sessions = [
+            Session.local(date.fromisoformat(r["date"]), time.fromisoformat(r["open"]),
+                          time.fromisoformat(r["close"]))
+            for r in rows
+        ]
+        return MarketCalendar(sessions, start=start, end=end, source="alpaca")
 
 
 def client_order_id(order: OrderProposal) -> str:

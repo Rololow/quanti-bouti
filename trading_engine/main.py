@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
 
 from trading_engine.config import DEFAULT_CONFIG_PATH, load_config
 from trading_engine.api.server import DashboardServer, export_static
@@ -53,6 +54,11 @@ def print_safety(engine: Engine) -> None:
     scores = engine.integrity.scores()
     worst = min(scores.items(), key=lambda kv: kv[1]) if scores else None
     print(f"  safety: {status.state.value} {'; '.join(status.reasons) or ''}".rstrip())
+    if engine.calendar is not None and engine.features.now is not None:
+        now = engine.features.now
+        state = "ouvert" if engine.calendar.is_open(now) else "fermé"
+        print(f"  marché: {state} (calendrier {engine.calendar.source})"
+              f"{' — ' + engine.market_block if engine.market_block else ''}")
     print(f"  data: accepted={engine.integrity.accepted} withheld={engine.integrity.withheld} "
           f"worst_score={'-' if worst is None else f'{worst[0]} {worst[1]:.2f}'} "
           f"issues={dict(sorted(engine.integrity.counts.items())) or '-'} "
@@ -288,6 +294,11 @@ async def _run(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # Console Windows redirigée (cp1252) : caractères non affichables remplacés
+    # plutôt qu'une UnicodeEncodeError en plein run.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--dashboard", type=int, nargs="?", const=8050, default=None, metavar="PORT",

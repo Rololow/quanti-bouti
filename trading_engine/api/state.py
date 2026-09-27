@@ -52,6 +52,16 @@ def _signal(sig) -> dict | None:
     }
 
 
+def _market(engine) -> dict | None:
+    cal, now = engine.calendar, engine.features.now
+    if cal is None or now is None:
+        return None
+    session = cal.session_at(now)
+    return {"open": session is not None, "calendar": cal.source, "block": engine.market_block,
+            "close": session.close if session else None,
+            "next_open": None if session else cal.next_open(now)}
+
+
 def build_state(engine, *, history: int = 500, decisions: int = 50, alerts: int = 50) -> dict:
     state = engine.snapshot()
     symbols = engine.universe()
@@ -140,6 +150,7 @@ def build_state(engine, *, history: int = 500, decisions: int = 50, alerts: int 
             "execution_mode": engine.config.execution.mode,
             "events": engine.bus.published_count, "handler_errors": engine.bus.error_count,
             "feed_status": getattr(engine.feed, "status", None),
+            "market": _market(engine),
         },
         "safety": {"state": status.state, "reasons": status.reasons, "frozen": status.frozen_symbols,
                    "daily_return": engine.safety.daily_return},

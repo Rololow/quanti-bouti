@@ -262,6 +262,15 @@ ai:
   server_fallbacks: true    # si le modèle décline, l'API rejoue sur un modèle de repli
   simulated_latency_seconds: 5
 
+calendar:
+  # Séances NYSE : aucune décision hors séance ni près de l'ouverture / clôture.
+  # auto : actif avec le flux Alpaca (calendrier Alpaca), inactif en simulation.
+  # on : règles NYSE (fériés, clôtures à 13h00) quel que soit le flux. off : 24/7.
+  mode: auto
+  avoid_open_minutes: 5
+  avoid_close_minutes: 15
+  horizon_days: 30
+
 warmup:
   # Flux Alpaca : historique chargé au démarrage (jours calendaires) pour que
   # covariance, régimes et momentum soient prêts tout de suite.

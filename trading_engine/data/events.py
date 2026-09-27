@@ -32,6 +32,7 @@ class EventType(str, Enum):
     ALERT = "alert"
     NEWS_ANALYSIS = "news_analysis"
     ORDER_UPDATE = "order_update"
+    CALENDAR = "calendar"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -141,6 +142,13 @@ class FundamentalEvent(Event):
 @dataclass(frozen=True, kw_only=True)
 class PortfolioEvent(Event):
     event_type = EventType.PORTFOLIO
+
+
+@dataclass(frozen=True, kw_only=True)
+class CalendarEvent(Event):
+    """Séances de marché (payload : `MarketCalendar.to_payload()`)."""
+
+    event_type = EventType.CALENDAR
 
 
 @dataclass(frozen=True, kw_only=True)

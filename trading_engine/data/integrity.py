@@ -112,14 +112,17 @@ class DataIntegrity:
     def global_score(self) -> float:
         return min((st.score for st in self._state.values()), default=1.0)
 
-    def stale_symbols(self, now: datetime | None = None) -> list[str]:
+    def stale_symbols(self, now: datetime | None = None, since: datetime | None = None) -> list[str]:
+        """Symboles sans donnée depuis `stale_after` s. `since` : début de la
+        période où des données sont attendues (ouverture de la séance)."""
         now = now or self.last_event_time
         if now is None:
             return []
         limit = timedelta(seconds=self.config.stale_after)
         return sorted(
             sym for sym, st in self._state.items()
-            if st.last_timestamp is not None and now - st.last_timestamp > limit
+            if st.last_timestamp is not None
+            and now - (st.last_timestamp if since is None else max(st.last_timestamp, since)) > limit
         )
 
     def check(self, event: Event) -> IntegrityResult:

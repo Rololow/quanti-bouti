@@ -68,7 +68,8 @@ from trading_engine.execution.alpaca_trading import (
 )
 from trading_engine.execution.paper_broker import PaperBroker
 from trading_engine.data.alpaca_history import AlpacaHistoricalClient
-from trading_engine.data.events import OrderUpdateEvent, PortfolioEvent
+from trading_engine.data.events import CalendarEvent, OrderUpdateEvent, PortfolioEvent
+from trading_engine.data.calendar import MarketCalendar
 from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
@@ -178,6 +179,10 @@ class Engine:
         self._injected: list = []            # événements produits par le moteur (sync, rapprochement)
         self.remote_errors = 0
         self.taxes_outside_broker = 0.0      # taxes dues mais non prélevées par le broker
+        # Séances de marché : reçues comme CalendarEvent (journalisé).
+        self.calendar: MarketCalendar | None = None
+        self.market_block: str | None = None  # raison de ne pas trader au dernier intervalle
+        self._calendar_requested = False
         self.last_plan: ExecutionPlan | None = None
         self.plans: deque[ExecutionPlan] = deque(maxlen=500)
         self.fills: list[Fill] = []
@@ -211,6 +216,7 @@ class Engine:
         self.bus.subscribe(EventType.NEWS_ANALYSIS, self._on_news_analysis)
         self.bus.subscribe(EventType.ORDER_UPDATE, self._on_order_update)
         self.bus.subscribe(EventType.PORTFOLIO, self._on_portfolio_event)
+        self.bus.subscribe(EventType.CALENDAR, self._on_calendar)
 
     def _build_tax_model(self) -> TaxModel | None:
         if not self.config.tax.profile:
@@ -406,6 +412,13 @@ class Engine:
         """Une fois toutes les barres de l'intervalle traitées : nouvelle cible
         (sauf allocation statique), puis rapport de risque."""
         self._interval_due = False
+        if self.calendar is not None and self.features.now is not None:
+            cal = self.config.calendar
+            self.market_block = self.calendar.trading_block(
+                self.features.now, cal.avoid_open_minutes, cal.avoid_close_minutes)
+            if self._calendar_source() is not None and \
+                    self.calendar.end < self.features.now.date() + timedelta(days=5):
+                await self._load_calendar(self.features.now)
         self.risk_report = self.risk.evaluate(self._raw_snapshot())
         await self._publish_breaches(self.risk_report)
         status = self.evaluate_safety()
@@ -485,6 +498,9 @@ class Engine:
             if order is None:
                 notes.append(f"{sym}: quantité arrondie à zéro")
                 continue
+            session = None if self.calendar is None else self.calendar.session_at(order.timestamp)
+            if session is not None and order.expires_at > session.close:
+                order = dataclasses.replace(order, duration=session.close - order.timestamp)
             ms = self.market_state.get(sym)
             recent_volume = self.volume.expected_volume(sym, order.duration)
             # Les plafonds connus (taille d'ordre, participation) sont respectés
@@ -638,6 +654,38 @@ class Engine:
         if self.remote_broker is not None:
             self.remote_broker.on_update(event)
 
+    # ------------------------------------------------------------------ calendrier
+
+    def _calendar_source(self) -> str | None:
+        """Source du calendrier à charger en live (None : pas de chargement ;
+        en replay, le calendrier vient du journal)."""
+        mode, provider = self.config.calendar.mode, self.config.feed.provider
+        if mode == "off" or provider == "replay":
+            return None
+        if provider == "alpaca":
+            return "alpaca"
+        return "rules" if mode == "on" else None
+
+    async def _load_calendar(self, now: datetime) -> None:
+        start = now.date() - timedelta(days=7)
+        end = now.date() + timedelta(days=self.config.calendar.horizon_days)
+        calendar = None
+        if self._calendar_source() == "alpaca":
+            try:
+                client = self.remote_broker.client if self.remote_broker is not None \
+                    else AlpacaTradingClient.from_env()
+                calendar = await asyncio.to_thread(client.calendar, start, end)
+            except Exception as exc:        # repli : règles NYSE
+                logger.warning("Alpaca calendar failed, NYSE rules used: %s", exc)
+        if calendar is None:
+            calendar = MarketCalendar.from_rules(start, end)
+        self._injected.append(CalendarEvent(timestamp=now, received_at=now, symbol=None,
+                                            source=f"calendar_{calendar.source}",
+                                            payload=calendar.to_payload()))
+
+    def _on_calendar(self, event: CalendarEvent) -> None:
+        self.calendar = MarketCalendar.from_payload(event.payload)
+
     async def _warmup(self) -> None:
         """Historique Alpaca au démarrage (flux live uniquement)."""
         wcfg = self.config.warmup
@@ -667,6 +715,7 @@ class Engine:
                 spreads[sym] = ms.spread / ((ms.bid + ms.ask) / 2)
         ens = self.models.ensemble
         return DecisionContext(
+            market_block=self.market_block,
             timestamp=state.timestamp,
             portfolio_value=state.total_value,
             current={p.symbol: p.weight for p in state.positions},
@@ -767,11 +816,20 @@ class Engine:
         return self.safety.evaluate(
             now,
             data_scores=self.integrity.scores(),
-            stale_symbols=self.integrity.stale_symbols(now),
+            stale_symbols=self._stale_symbols(now),
             corporate_actions={s: i.timestamp for s, i in self.integrity.corporate_actions.items()},
             risk_breaches=[b.kind for b in report.breaches] if report else (),
             model_health=self.models.health(),
         )
+
+    def _stale_symbols(self, now: datetime | None) -> list[str]:
+        if self.calendar is None or now is None:
+            return self.integrity.stale_symbols(now)
+        session = self.calendar.session_at(now)
+        if session is None:
+            return []                  # marché fermé : l'absence de données est normale
+        # Fraîcheur comptée depuis l'ouverture (pas depuis la clôture de la veille).
+        return self.integrity.stale_symbols(now, since=session.open)
 
     def _reallocate(self, status: SafetyStatus) -> None:
         symbols = self.universe()
@@ -875,9 +933,9 @@ class Engine:
             if self.integrity.check_bar(event) is None:
                 self._warmup_bar(event)
             return
-        if isinstance(event, (OrderUpdateEvent, PortfolioEvent)):
-            # Événements du compte broker : pas des données de marché (ils ne
-            # doivent pas rafraîchir la fraîcheur d'un symbole).
+        if isinstance(event, (OrderUpdateEvent, PortfolioEvent, CalendarEvent)):
+            # Événements du compte broker et calendrier : pas des données de
+            # marché (ils ne doivent pas rafraîchir la fraîcheur d'un symbole).
             await self.bus.publish(event)
             return
         checked = self.integrity.check(event)
@@ -901,6 +959,9 @@ class Engine:
                 await self._drain_injected()
             await self._warmup()
             async for event in self.feed:
+                if self.calendar is None and not self._calendar_requested and self._calendar_source():
+                    self._calendar_requested = True
+                    await self._load_calendar(event.timestamp)
                 # Les analyses IA et les événements produits par le moteur
                 # (compte broker) passent d'abord, et sont journalisés : même
                 # ordre en live et en replay.

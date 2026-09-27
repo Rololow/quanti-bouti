@@ -150,6 +150,7 @@ class DecisionContext:
     spreads: Mapping[str, float] = field(default_factory=dict)   # spread relatif (ask-bid)/mid
     signals: Mapping[str, Signal | None] = field(default_factory=dict)
     safety_state: str = "NORMAL"
+    market_block: str | None = None       # marché fermé / ouverture / clôture : pas de trade
     frozen: frozenset[str] = frozenset()
     data_scores: Mapping[str, float] = field(default_factory=dict)
     robustness: float | None = None
@@ -238,6 +239,8 @@ class DecisionEngine:
         # --- filtres
         if ctx.safety_state == "HALTED":
             return self._nothing(ctx, ["safety HALTED : aucune nouvelle décision"])
+        if ctx.market_block:
+            return self._nothing(ctx, [ctx.market_block])
         if not ctx.target:
             return self._nothing(ctx, ["pas encore de cible"])
         if ctx.cov is None or ctx.portfolio_value <= 0:
