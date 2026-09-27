@@ -168,5 +168,9 @@ class FeatureEngine:
     def covariance(self, timeframe: str) -> tuple[list[str], np.ndarray]:
         return self._covariances[timeframe].covariance()
 
+    @property
+    def covariance_timeframes(self) -> tuple[str, ...]:
+        return tuple(self._covariances)
+
     def correlation_updates(self, timeframe: str) -> int:
         return self._covariances[timeframe].n_updates

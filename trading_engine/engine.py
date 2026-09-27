@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from trading_engine.allocation.baseline import BaselineAllocator, TargetAllocation
 from trading_engine.config import Config
 from trading_engine.data.alpaca_feed import AlpacaMarketFeed
 from trading_engine.data.bar_builder import BarBuilder
@@ -14,9 +15,11 @@ from trading_engine.data.event_bus import EventBus
 from trading_engine.data.events import BarEvent, EventType, QuoteEvent, TradeEvent
 from trading_engine.data.market_feed import MarketFeed, SimulatedMarketFeed
 from trading_engine.data.market_state import MarketStateStore
+from trading_engine.data.replay_feed import ReplayFeed
 from trading_engine.features.feature_engine import TICK, FeatureEngine
 from trading_engine.portfolio.portfolio import Portfolio, PortfolioState
 from trading_engine.portfolio.positions import Position
+from trading_engine.storage.event_log import EventLogWriter
 
 
 class Engine:
@@ -46,7 +49,17 @@ class Engine:
             },
             target_weights=config.portfolio.target_weights,
         )
+        alloc = config.allocation
+        self.allocator = (
+            BaselineAllocator(**vars(alloc.baseline)) if alloc.method == "baseline" else None
+        )
+        self.last_allocation: TargetAllocation | None = None
+        self._allocation_due = False
+
         self.feed = feed or self._default_feed()
+        self.recorder = (
+            EventLogWriter(config.storage.event_log) if config.storage.event_log else None
+        )
         self.reporter = reporter
         self.trade_count = 0
         self.bars: list[BarEvent] = []
@@ -63,6 +76,10 @@ class Engine:
                 max_events=self.config.engine.max_events,
                 **vars(feed_cfg.alpaca),
             )
+        if feed_cfg.provider == "replay":
+            if not feed_cfg.replay_path:
+                raise ValueError("feed.replay_path is required for the replay provider")
+            return ReplayFeed(feed_cfg.replay_path, max_events=self.config.engine.max_events)
         if feed_cfg.provider != "simulated":
             raise ValueError(f"unknown feed provider {feed_cfg.provider!r}")
         initial = {
@@ -102,12 +119,29 @@ class Engine:
         self.bars.append(event)
         self.market_state.update(event)
         self.features.on_bar(event)
+        if self.allocator is not None and event.timeframe == self.config.allocation.rebalance_timeframe:
+            self._allocation_due = True
+
+    def _reallocate(self) -> None:
+        """Recalcule la cible une fois toutes les barres de l'intervalle traitées."""
+        self._allocation_due = False
+        symbols = sorted(set(self.config.feed.symbols) | set(self.features.symbols()))
+        self.last_allocation = self.allocator.allocate(self.features, symbols)
+        self.portfolio.set_target_weights(self.last_allocation.weights)
 
     def snapshot(self) -> PortfolioState:
         vols = {sym: self.features.volatility.get(sym, TICK) for sym in self.market_state.prices()}
         return self.portfolio.snapshot(volatilities=vols)
 
     async def run(self) -> PortfolioState:
-        async for event in self.feed:
-            await self.bus.publish(event)
+        try:
+            async for event in self.feed:
+                if self.recorder is not None:
+                    self.recorder.write(event)
+                await self.bus.publish(event)
+                if self._allocation_due:
+                    self._reallocate()
+        finally:
+            if self.recorder is not None:
+                self.recorder.close()
         return self.snapshot()

@@ -18,9 +18,10 @@ python -m trading_engine.main
 pytest
 ```
 
-État actuel : Phase 1 (Core), Phase 2 (Realtime) et Phase 3 (Features :
+État actuel : Phase 1 (Core), Phase 2 (Realtime), Phase 3 (Features :
 rendements, volatilité EWMA, momentum multi-horizon normalisé, mean reversion,
-VWAP, corrélations EWMA) sur des barres 5m / 1h / 1d.
+VWAP, corrélations EWMA) et Phase 4 (journal d'événements, replay déterministe,
+baseline momentum + volatility targeting).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -30,6 +31,19 @@ export APCA_API_KEY_ID=...        # voir .env.example
 export APCA_API_SECRET_KEY=...
 # puis dans config/config.yaml : feed.provider: alpaca, engine.max_events: null
 python -m trading_engine.main
+```
+
+Enregistrer puis rejouer une session (même moteur, même résultat) :
+
+```yaml
+# config/config.yaml
+storage:
+  event_log: data/events.jsonl     # enregistre les événements bruts reçus
+feed:
+  provider: replay                 # puis rejoue le journal
+  replay_path: data/events.jsonl
+allocation:
+  method: baseline                 # ou static : interrupteur d'ablation
 ```
 
 Le plan Alpaca gratuit donne accès au flux `iex`. Le client gère la
@@ -2196,11 +2210,11 @@ tax constraints
 ## Phase 4 — Replay & Storage
 
 ```text
-[ ] Event log (journal JSONL des événements bruts)
-[ ] ReplayFeed (même moteur, source rejouée)
-[ ] Replay déterministe (live == replay)
-[ ] Baseline : momentum + volatility targeting
-[ ] Interrupteurs de modules (ablation)
+[x] Event log (journal JSONL des événements bruts)
+[x] ReplayFeed (même moteur, source rejouée)
+[x] Replay déterministe (live == replay)
+[x] Baseline : momentum + volatility targeting
+[x] Interrupteurs de modules (ablation)
 ```
 
 ## Phase 5 — Online Models

@@ -7,9 +7,11 @@ engine:
   report_every: 5000
 
 feed:
-  # "simulated" (flux déterministe, sans clé) ou "alpaca" (temps réel).
+  # "simulated" (flux déterministe, sans clé), "alpaca" (temps réel) ou
+  # "replay" (rejoue le journal replay_path avec exactement le même moteur).
   # Alpaca lit ses clés dans APCA_API_KEY_ID / APCA_API_SECRET_KEY.
   provider: simulated
+  replay_path: data/events.jsonl
   symbols: [SPY, QQQ, TLT, GLD]
   seed: 42
   # Intervalle entre deux trades simulés (secondes de temps de marché).
@@ -37,6 +39,23 @@ features:
   zscore_window: 20
   # null = tous les timeframes de barres
   correlation_timeframes: [5m, 1h, 1d]
+
+allocation:
+  # Interrupteur d'ablation : "static" (portfolio.target_weights) ou
+  # "baseline" (momentum + volatility targeting, la référence à battre).
+  method: static
+  # Recalcul de la cible à chaque clôture de barre de ce timeframe.
+  rebalance_timeframe: 1h
+  baseline:
+    momentum_horizon: 1h
+    vol_timeframe: 1h
+    target_vol: 0.10     # volatilité annualisée cible du portefeuille
+    budget: 1.0          # fraction maximale investie
+    max_weight: 0.40
+
+storage:
+  # Journal JSONL des événements bruts reçus (null = désactivé). Sert au replay.
+  event_log: null
 
 volatility:
   # Facteur de décroissance EWMA (RiskMetrics : 0.94 en daily).
