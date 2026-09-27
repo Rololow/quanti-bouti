@@ -181,8 +181,9 @@ class RobustnessConfig:
 @dataclass(frozen=True)
 class ExecutionConfig:
     # off : pas d'ordres ; proposals : ordres proposés (pour un humain) ;
-    # paper : ordres exécutés de façon simulée sur le flux. Aucun ordre réel
-    # n'est jamais envoyé à un broker.
+    # paper : exécution simulée localement sur le flux ;
+    # alpaca_paper : ordres envoyés au compte PAPER Alpaca (fills réels simulés
+    # par Alpaca, sans argent réel). Aucun compte réel n'est jamais utilisé.
     mode: str = "paper"
     volume_timeframe: str = "5m"
     max_participation: float = 0.10
@@ -190,10 +191,15 @@ class ExecutionConfig:
     learn_impact: bool = False
     cost: CostConfig = field(default_factory=CostConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    # alpaca_paper
+    sync_portfolio: bool = True        # cash et positions lus sur le compte au démarrage
+    reconcile: bool = True             # rapprochement à chaque intervalle (sans ordre en cours)
+    time_in_force: str = "day"
 
     def __post_init__(self) -> None:
-        if self.mode not in ("off", "proposals", "paper"):
-            raise ValueError(f"execution.mode must be off, proposals or paper, got {self.mode!r}")
+        if self.mode not in ("off", "proposals", "paper", "alpaca_paper"):
+            raise ValueError(
+                f"execution.mode must be off, proposals, paper or alpaca_paper, got {self.mode!r}")
 
 
 @dataclass(frozen=True)
@@ -249,6 +255,15 @@ class AISettings:
 
 
 @dataclass(frozen=True)
+class WarmupConfig:
+    """Historique chargé au démarrage (flux Alpaca) : jours calendaires par timeframe."""
+
+    enabled: bool = True
+    lookback_days: Mapping[str, float] = field(
+        default_factory=lambda: {"5m": 5, "1h": 45, "1d": 400})
+
+
+@dataclass(frozen=True)
 class TaxConfig:
     profile: str | None = None                     # ex. config/taxes/BE.toml ; None = pas de fiscalité
     step_up_prices: Mapping[str, float] = field(default_factory=dict)
@@ -276,6 +291,7 @@ class Config:
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     qualitative: QualitativeConfig = field(default_factory=QualitativeConfig)
     ai: AISettings = field(default_factory=AISettings)
+    warmup: WarmupConfig = field(default_factory=WarmupConfig)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -366,6 +382,7 @@ class Config:
             execution=_execution_config(raw.get("execution") or {}),
             qualitative=_qualitative_config(raw.get("qualitative") or {}),
             ai=AISettings(**(raw.get("ai") or {})),
+            warmup=WarmupConfig(**(raw.get("warmup") or {})),
             alerts=AlertConfig(**{
                 k: tuple(v) if k == "regime_horizons" else v
                 for k, v in (raw.get("alerts") or {}).items()

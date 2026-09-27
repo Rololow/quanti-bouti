@@ -95,6 +95,15 @@ class SafetyEngine:
             return None
         return self._last_value / self._day_open_value - 1.0
 
+    def halt(self, reason: str, timestamp: datetime | None = None) -> SafetyStatus:
+        """Arrêt immédiat demandé par une source externe (ex. compte broker bloqué)."""
+        self.state = SafetyState.HALTED
+        self._halt_reasons = (reason,)
+        self.status = SafetyStatus(SafetyState.HALTED, self._halt_reasons, self.status.frozen_symbols, timestamp)
+        self.history.append(self.status)
+        logger.warning("safety state -> HALTED (%s)", reason)
+        return self.status
+
     def record_hard_control_rejection(self, timestamp: datetime, reason: str) -> None:
         day = timestamp.date()
         self._rejections[day] = self._rejections.get(day, 0) + 1

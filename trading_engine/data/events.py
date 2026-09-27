@@ -31,6 +31,7 @@ class EventType(str, Enum):
     DECISION = "decision"
     ALERT = "alert"
     NEWS_ANALYSIS = "news_analysis"
+    ORDER_UPDATE = "order_update"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -167,6 +168,32 @@ class NewsAnalysisEvent(Event):
     model: str = ""
 
     event_type = EventType.NEWS_ANALYSIS
+
+
+@dataclass(frozen=True, kw_only=True)
+class OrderUpdateEvent(Event):
+    """Mise à jour d'un ordre chez le broker (Alpaca `trade_updates`).
+
+    `update` : new | fill | partial_fill | canceled | expired | rejected | ...
+    `fill_qty` / `fill_price` : exécution de cet événement (fill, partial_fill) ;
+    `filled_qty` / `filled_avg_price` : cumul de l'ordre. Enregistrée dans le
+    journal : le replay rejoue les fills sans broker.
+    """
+
+    client_order_id: str
+    broker_order_id: str = ""
+    update: str = ""
+    side: str = ""
+    fill_qty: float = 0.0
+    fill_price: float | None = None
+    filled_qty: float = 0.0
+    filled_avg_price: float | None = None
+
+    event_type = EventType.ORDER_UPDATE
+
+    @property
+    def terminal(self) -> bool:
+        return self.update in ("fill", "canceled", "expired", "rejected", "done_for_day")
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -148,9 +148,13 @@ decision:
   include_alpha: true
 
 execution:
-  # off | proposals | paper — aucun ordre réel n'est JAMAIS envoyé à un broker.
-  # paper : ordres exécutés de façon simulée sur le flux (au prix limite).
+  # off | proposals | paper | alpaca_paper — aucun compte réel n'est JAMAIS utilisé.
+  # paper : exécution simulée localement sur le flux (au prix limite) ;
+  # alpaca_paper : ordres envoyés au compte PAPER Alpaca (feed.provider: alpaca).
   mode: paper
+  sync_portfolio: true      # alpaca_paper : cash et positions lus sur le compte
+  reconcile: true           # alpaca_paper : rapprochement à chaque intervalle
+  time_in_force: day
   volume_timeframe: 5m      # barres utilisées pour estimer le volume de marché
   max_participation: 0.10   # part maximale du volume de marché
   fill_share: 1.0           # paper : part d'un trade imprimé qu'on peut prendre
@@ -257,6 +261,12 @@ ai:
   extract_fundamentals: true
   server_fallbacks: true    # si le modèle décline, l'API rejoue sur un modèle de repli
   simulated_latency_seconds: 5
+
+warmup:
+  # Flux Alpaca : historique chargé au démarrage (jours calendaires) pour que
+  # covariance, régimes et momentum soient prêts tout de suite.
+  enabled: true
+  lookback_days: {5m: 5, 1h: 45, 1d: 400}
 
 tax:
   # Profil fiscal du pays de résidence (null = pas de fiscalité).

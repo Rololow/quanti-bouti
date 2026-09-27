@@ -98,6 +98,10 @@ def print_execution(engine: Engine) -> None:
     print(f"  execution ({mode}): fills={len(engine.fills)} ordres clos={len(fb.records)} "
           f"confiance={fb.execution_confidence:.2f} calibration fill={engine.fill_model.calibration:.2f} "
           f"η impact={engine.cost_model.eta:.2f} TOB payée={engine.tax.transaction_taxes_paid if engine.tax else 0:.2f}")
+    remote = engine.remote_broker
+    if remote is not None:
+        print(f"    compte Alpaca paper : ordres en cours={len(remote.working)} rejets broker={engine.remote_errors} "
+              f"oubliés={remote.forgotten} taxes dues hors broker={engine.taxes_outside_broker:.2f}")
     if plan is None:
         return
     print(f"    dernier plan {plan.decision_id}: {len(plan.orders)} ordre(s), "

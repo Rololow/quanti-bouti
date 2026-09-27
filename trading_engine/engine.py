@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import math
@@ -59,7 +60,15 @@ from trading_engine.execution.fill_model import FillModel
 from trading_engine.execution.hard_controls import HardControls
 from trading_engine.execution.optimizer import OrderOptimizer
 from trading_engine.execution.orders import ExecutionPlan, Fill, RejectedOrder
+from trading_engine.execution.alpaca_trading import (
+    AlpacaPaperBroker,
+    AlpacaTradeUpdatesFeed,
+    AlpacaTradingClient,
+    client_order_id,
+)
 from trading_engine.execution.paper_broker import PaperBroker
+from trading_engine.data.alpaca_history import AlpacaHistoricalClient
+from trading_engine.data.events import OrderUpdateEvent, PortfolioEvent
 from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
@@ -68,7 +77,7 @@ from trading_engine.safety.safety_engine import SafetyEngine, SafetyState, Safet
 from trading_engine.storage.decision_log import DecisionLogWriter
 from trading_engine.storage.event_log import EventLogWriter
 from trading_engine.tax.profile import load_tax_profile
-from trading_engine.timeutils import parse_timeframe
+from trading_engine.timeutils import parse_timeframe, utcnow
 from trading_engine.tax.tax_model import RebalanceTaxCost, TaxModel
 
 logger = logging.getLogger(__name__)
@@ -156,6 +165,19 @@ class Engine:
             self.fill_model, self.cost_model, learn_impact=ex.learn_impact
         )
         self.broker = PaperBroker(ex.fill_share) if ex.mode == "paper" else None
+        # Compte PAPER Alpaca : seulement avec le flux Alpaca live. En replay, les
+        # fills et l'état du compte viennent du journal (aucun appel au broker).
+        self.remote_broker: AlpacaPaperBroker | None = None
+        if ex.mode == "alpaca_paper":
+            if config.feed.provider == "alpaca":
+                self.remote_broker = AlpacaPaperBroker(AlpacaTradingClient.from_env(),
+                                                       time_in_force=ex.time_in_force)
+            elif config.feed.provider != "replay":
+                raise ValueError("execution.mode alpaca_paper requires feed.provider alpaca (or replay)")
+        self._orders_by_cid: dict[str, "OrderProposal"] = {}
+        self._injected: list = []            # événements produits par le moteur (sync, rapprochement)
+        self.remote_errors = 0
+        self.taxes_outside_broker = 0.0      # taxes dues mais non prélevées par le broker
         self.last_plan: ExecutionPlan | None = None
         self.plans: deque[ExecutionPlan] = deque(maxlen=500)
         self.fills: list[Fill] = []
@@ -187,6 +209,8 @@ class Engine:
         self.bus.subscribe(EventType.FUNDAMENTAL, self._on_fundamental)
         self.bus.subscribe(EventType.NEWS, self._on_news)
         self.bus.subscribe(EventType.NEWS_ANALYSIS, self._on_news_analysis)
+        self.bus.subscribe(EventType.ORDER_UPDATE, self._on_order_update)
+        self.bus.subscribe(EventType.PORTFOLIO, self._on_portfolio_event)
 
     def _build_tax_model(self) -> TaxModel | None:
         if not self.config.tax.profile:
@@ -205,12 +229,21 @@ class Engine:
             logger.warning("tax: %s", warning)
         return model
 
-    def record_fill(self, symbol: str, quantity: float, price: float, timestamp: datetime) -> None:
-        """Applique un fill : position, cash, taxe sur transaction et lots fiscaux."""
+    def record_fill(self, symbol: str, quantity: float, price: float, timestamp: datetime,
+                    *, tax_in_cash: bool = True) -> None:
+        """Applique un fill : position, cash, taxe sur transaction et lots fiscaux.
+
+        `tax_in_cash=False` : fill d'un broker externe dont le cash fait foi. Le
+        broker ne prélève pas la taxe (TOB via broker étranger : déclarée et payée
+        par l'investisseur) ; elle est comptée à part dans `taxes_outside_broker`.
+        """
         self.portfolio.apply_fill(symbol, quantity, price)
         if self.tax is not None:
             charge, _ = self.tax.record_fill(symbol, quantity, price, timestamp)
-            self.portfolio.cash -= charge.amount
+            if tax_in_cash:
+                self.portfolio.cash -= charge.amount
+            else:
+                self.taxes_outside_broker += charge.amount
 
     def estimate_rebalance_tax(self) -> RebalanceTaxCost | None:
         """Coût fiscal estimé pour rejoindre la cible actuelle depuis les poids courants."""
@@ -280,6 +313,9 @@ class Engine:
                 **vars(feed_cfg.alpaca),
             )
             extra = self._qualitative_feeds(None, None)
+            if self.config.execution.mode == "alpaca_paper":
+                key, secret = self.remote_broker.client.credentials()
+                extra.append(AlpacaTradeUpdatesFeed(key_id=key, secret_key=secret))
             return ConcurrentFeed([market, *extra]) if extra else market
         if feed_cfg.provider == "replay":
             # Le journal contient déjà tous les événements (marché, news, fondamentaux).
@@ -375,15 +411,21 @@ class Engine:
         status = self.evaluate_safety()
         if self.config.allocation.method != "static" and status.can_decide:
             self._reallocate(status)
-        if not status.can_decide and self.broker is not None:
-            for wo in self.broker.cancel_all():       # HALTED : plus aucun ordre en cours
-                self.execution_feedback.on_order_closed(wo.order, wo.filled, wo.average_price)
+        if not status.can_decide:                    # HALTED : plus aucun ordre en cours
+            if self.broker is not None:
+                for wo in self.broker.cancel_all():
+                    self.execution_feedback.on_order_closed(wo.order, wo.filled, wo.average_price)
+            if self.remote_broker is not None:
+                await self.remote_broker.cancel_all()
         decision = None
         if self.config.decision.enabled:
             decision = self.decide(status)
             await self._publish_decision(decision)
             if decision.action == "UREBALANCE" and self.config.execution.mode != "off":
-                self.execute(self.plan_execution(decision, status))
+                await self.execute(self.plan_execution(decision, status))
+        if (self.remote_broker is not None and self.config.execution.reconcile
+                and not self.remote_broker.working):
+            await self._fetch_account("reconcile")
         await self._publish_alerts(status, decision)
         self._record_history(status, decision)
 
@@ -490,14 +532,130 @@ class Engine:
         self.plans.append(plan)
         return plan
 
-    def execute(self, plan: ExecutionPlan) -> None:
-        """Paper : remplace les ordres en cours par ceux du nouveau plan."""
+    async def execute(self, plan: ExecutionPlan) -> None:
+        """Remplace les ordres en cours par ceux du nouveau plan."""
+        # Identifiants déterministes : en replay, les mises à jour du journal
+        # retrouvent leur ordre à partir des plans recalculés.
+        for order in plan.orders:
+            self._orders_by_cid[client_order_id(order)] = order
+        if self.remote_broker is not None:
+            await self.remote_broker.cancel_all()
+            for order in plan.orders:
+                if await self.remote_broker.submit(order) is None:
+                    self.remote_errors += 1
+                    self.safety.record_hard_control_rejection(
+                        order.timestamp, f"BROKER_REJECTED {self.remote_broker.errors[-1]}")
+            return
         if self.broker is None:
             return                                   # mode proposals : un humain décide
         for wo in self.broker.cancel_all():
             self.execution_feedback.on_order_closed(wo.order, wo.filled, wo.average_price)
         for order in plan.orders:
             self.broker.submit(order)
+
+    # ------------------------------------------------------------------ compte Alpaca paper
+
+    async def _fetch_account(self, kind: str) -> None:
+        """Lit le compte paper ; le résultat entre dans le flux comme un
+        PortfolioEvent (journalisé : le replay repart du même état)."""
+        client = self.remote_broker.client
+        try:
+            account = await asyncio.to_thread(client.account)
+            positions = await asyncio.to_thread(client.positions)
+        except Exception as exc:
+            logger.warning("Alpaca account %s failed: %s", kind, exc)
+            return
+        now = utcnow()
+        self._injected.append(PortfolioEvent(
+            timestamp=now, received_at=now, symbol=None, source="alpaca_trading",
+            payload={
+                "kind": kind, "cash": account.cash, "equity": account.equity,
+                "status": account.status, "trading_blocked": account.trading_blocked,
+                "positions": {p.symbol: [p.quantity, p.avg_price, p.price] for p in positions},
+            },
+        ))
+
+    def _on_portfolio_event(self, event: PortfolioEvent) -> None:
+        data = event.payload
+        kind = data.get("kind")
+        if kind not in ("sync", "reconcile"):
+            return
+        if data.get("trading_blocked") or data.get("status") not in (None, "ACTIVE"):
+            self.safety.halt(f"BROKER_ACCOUNT {data.get('status')} blocked={data.get('trading_blocked')}",
+                             event.timestamp)
+        positions = {sym: tuple(v) for sym, v in (data.get("positions") or {}).items()}
+        engine_qty = {s: p.quantity for s, p in self.portfolio.positions.items() if p.quantity}
+        broker_qty = {s: v[0] for s, v in positions.items() if v[0]}
+        diffs = {s: broker_qty.get(s, 0.0) - engine_qty.get(s, 0.0)
+                 for s in set(engine_qty) | set(broker_qty)
+                 if abs(broker_qty.get(s, 0.0) - engine_qty.get(s, 0.0)) > 1e-6}
+        cash_diff = float(data["cash"]) - self.portfolio.cash
+        if kind == "reconcile" and not diffs and abs(cash_diff) < 1.0:
+            return
+        if kind == "reconcile":
+            self.alerts.append(Alert("RECONCILIATION", None, event.timestamp,
+                                     f"positions {diffs or '='} cash {cash_diff:+.2f} : état du broker adopté",
+                                     "warning"))
+        # Le broker fait foi : positions, prix moyens et cash.
+        self.portfolio.cash = float(data["cash"])
+        self.portfolio.positions = {
+            sym: Position(sym, qty, avg) for sym, (qty, avg, _) in positions.items()
+        }
+        for sym, (_, _, price) in positions.items():
+            if price:
+                self.portfolio.update_price(sym, price, event.timestamp)
+        if self.tax is not None and self.tax.gains is not None:
+            if kind == "sync":
+                self.tax.gains.lots.clear()
+                # Date d'achat inconnue : base fiscale = prix moyen du broker, datée
+                # de la synchronisation (pas de step-up supposé).
+                for sym, (qty, avg, _) in positions.items():
+                    if qty > 0:
+                        self.tax.gains.buy(sym, qty, avg, event.timestamp)
+            else:
+                for sym, diff in diffs.items():
+                    price = (positions.get(sym) or (0, 0, None))[2] or self.portfolio.prices.get(sym)
+                    if diff > 0 and price:
+                        self.tax.gains.buy(sym, diff, price, event.timestamp)
+                    elif diff < 0 and price:
+                        self.tax.gains.sell(sym, -diff, price, event.timestamp)
+
+    def _on_order_update(self, event: OrderUpdateEvent) -> None:
+        if event.update in ("fill", "partial_fill") and event.fill_qty and event.fill_price:
+            signed = event.fill_qty if event.side == "buy" else -event.fill_qty
+            order = self._orders_by_cid.get(event.client_order_id)
+            fill = Fill(event.symbol, signed, event.fill_price, event.timestamp,
+                        order.decision_id if order is not None else None)
+            self.fills.append(fill)
+            self.record_fill(event.symbol, signed, event.fill_price, event.timestamp, tax_in_cash=False)
+        if event.update == "rejected":
+            self.safety.record_hard_control_rejection(event.timestamp, f"BROKER_REJECTED {event.client_order_id}")
+        if event.terminal:
+            order = self._orders_by_cid.pop(event.client_order_id, None)
+            if order is not None:
+                signed_filled = event.filled_qty if order.quantity > 0 else -event.filled_qty
+                self.execution_feedback.on_order_closed(order, signed_filled, event.filled_avg_price)
+        if self.remote_broker is not None:
+            self.remote_broker.on_update(event)
+
+    async def _warmup(self) -> None:
+        """Historique Alpaca au démarrage (flux live uniquement)."""
+        wcfg = self.config.warmup
+        if not wcfg.enabled or self.config.feed.provider != "alpaca":
+            return
+        lookbacks = {tf: d for tf, d in wcfg.lookback_days.items() if tf in self.config.bar_timeframes}
+        client = AlpacaHistoricalClient.from_env(data_feed=self.config.feed.alpaca.data_feed)
+        for bar in await client.warmup_bars(self.config.feed.symbols, lookbacks):
+            await self._ingest(bar)
+
+    def _warmup_bar(self, bar: BarEvent) -> None:
+        """Barre historique : initialise l'état, sans décision ni alerte."""
+        self.market_state.update(bar)
+        self.features.on_bar(bar)
+        self.models.on_bar(bar)
+        if bar.timeframe == self.volume.timeframe:
+            self.volume.update(bar.symbol, bar.volume)
+        self.portfolio.update_price(bar.symbol, bar.close, bar.end)
 
     def decision_context(self, status: SafetyStatus) -> DecisionContext:
         state = self._raw_snapshot()
@@ -711,6 +869,17 @@ class Engine:
         # contrôles d'intégrité.
         if self.recorder is not None:
             self.recorder.write(event)
+        if isinstance(event, BarEvent) and event.payload.get("warmup"):
+            # Historique : ordre chronologique par timeframe (le contrôle de
+            # retard ne s'applique pas), mais une barre incohérente est rejetée.
+            if self.integrity.check_bar(event) is None:
+                self._warmup_bar(event)
+            return
+        if isinstance(event, (OrderUpdateEvent, PortfolioEvent)):
+            # Événements du compte broker : pas des données de marché (ils ne
+            # doivent pas rafraîchir la fraîcheur d'un symbole).
+            await self.bus.publish(event)
+            return
         checked = self.integrity.check(event)
         for issue in checked.issues:
             self.data_issues.append(issue)
@@ -721,14 +890,26 @@ class Engine:
             if self._interval_due:
                 await self._on_interval()
 
+    async def _drain_injected(self) -> None:
+        while self._injected:
+            await self._ingest(self._injected.pop(0))
+
     async def run(self) -> PortfolioState:
         try:
+            if self.remote_broker is not None and self.config.execution.sync_portfolio:
+                await self._fetch_account("sync")
+                await self._drain_injected()
+            await self._warmup()
             async for event in self.feed:
-                # Les analyses IA disponibles avant cet événement passent d'abord
-                # (et sont journalisées) : même ordre en live et en replay.
+                # Les analyses IA et les événements produits par le moteur
+                # (compte broker) passent d'abord, et sont journalisés : même
+                # ordre en live et en replay.
+                await self._drain_injected()
                 for analysis in self.ai.release(event.received_at):
                     await self._ingest(analysis)
                 await self._ingest(event)
+                if self.remote_broker is not None:
+                    await self.remote_broker.expire(event.timestamp)
             await self.ai.drain()
             for analysis in self.ai.release(None):
                 await self._ingest(analysis)

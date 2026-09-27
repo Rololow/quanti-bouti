@@ -79,6 +79,63 @@ Le plan Alpaca gratuit donne accès au flux `iex`. Le client gère la
 reconnexion (backoff exponentiel), le heartbeat (ping WebSocket en cas
 d'inactivité) et horodate chaque événement (heure bourse + heure de réception).
 
+### Tester avec un compte Alpaca **paper**
+
+Le mode `alpaca_paper` envoie les ordres validés par les hard controls au
+compte **paper** d'Alpaca (argent fictif, fills réels côté Alpaca). Le code
+n'accepte que l'hôte `paper-api.alpaca.markets` : aucun chemin vers un compte
+réel n'existe.
+
+```yaml
+# config/config.yaml
+feed:
+  provider: alpaca
+engine:
+  max_events: null
+storage:
+  event_log: data/events.jsonl     # recommandé : la session pourra être rejouée
+execution:
+  mode: alpaca_paper
+  sync_portfolio: true             # cash et positions lus sur le compte au démarrage
+  reconcile: true                  # rapprochement moteur / compte à chaque intervalle
+warmup:
+  enabled: true                    # historique chargé au démarrage
+```
+
+```bash
+export APCA_API_KEY_ID=...        # clés du compte PAPER
+export APCA_API_SECRET_KEY=...
+python -m trading_engine.main --dashboard
+```
+
+Au démarrage :
+
+1. **synchronisation** : cash et positions du compte paper deviennent l'état du
+   moteur (lots fiscaux reconstruits au prix moyen du broker) ; compte bloqué
+   ou non `ACTIVE` -> HALTED ;
+2. **warm-up** : barres historiques (REST `data.alpaca.markets`, 5 j en 5m,
+   45 j en 1h, 400 j en 1d par défaut) ; elles initialisent features,
+   covariance, régimes et volumes sans déclencher de décision ;
+3. **temps réel** : flux de marché + flux `trade_updates` du compte. Chaque
+   décision UREBALANCE remplace les ordres en cours **du moteur** (identifiant
+   `qb-<décision>-<symbole>` ; les autres ordres du compte ne sont jamais
+   touchés) par des ordres limite. Les fills arrivent par `trade_updates` et
+   mettent à jour positions, taxes et boucle de feedback. Ordre expiré ->
+   annulé ; sans nouvelles 5 min plus tard -> oublié, le rapprochement corrige.
+
+Le broker fait foi : à chaque intervalle sans ordre en cours, le compte est relu ;
+un écart déclenche une alerte `RECONCILIATION` et l'état du broker est adopté.
+La TOB n'est pas prélevée par Alpaca (broker étranger : à déclarer soi-même) ;
+elle est comptée à part (`taxes dues hors broker`).
+
+Tout ce qui vient d'Alpaca (historique, état du compte, mises à jour d'ordres)
+est enregistré dans le journal : `feed.provider: replay` avec
+`execution.mode: alpaca_paper` rejoue la session à l'identique, sans broker.
+
+Limites : marché US ouvert (15h30-22h00 heure de Bruxelles) ; horloge système
+synchronisée (NTP) ; le flux `iex` ne couvre qu'une partie du volume, les
+estimations de participation sont donc prudentes.
+
 ---
 
 ## 1. Vision
@@ -2682,6 +2739,9 @@ Le moteur :
 [x] Order proposals
 [x] Execution feedback loop
 [x] Paper broker (aucun ordre réel)
+[x] Broker Alpaca paper (ordres + trade_updates, verrouillé sur l'hôte paper)
+[x] Synchronisation et rapprochement du compte broker
+[x] Warm-up historique (barres Alpaca REST au démarrage)
 ```
 
 ## Phase 14 — Dashboard
