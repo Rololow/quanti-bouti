@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import math
 from collections import deque
 from datetime import date, datetime, timezone
 from typing import Callable
@@ -40,7 +42,14 @@ from trading_engine.features.feature_engine import FeatureEngine
 from trading_engine.models.model_engine import ModelEngine
 from trading_engine.portfolio.portfolio import Portfolio, PortfolioState
 from trading_engine.portfolio.positions import Position
+from trading_engine.execution.cost_model import ExecutionCostModel
+from trading_engine.execution.feedback import ExecutionFeedback
+from trading_engine.execution.fill_model import FillModel
 from trading_engine.execution.hard_controls import HardControls
+from trading_engine.execution.optimizer import OrderOptimizer
+from trading_engine.execution.orders import ExecutionPlan, Fill, RejectedOrder
+from trading_engine.execution.paper_broker import PaperBroker
+from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
 from trading_engine.robustness.stress import StressReport, stress_test
@@ -90,6 +99,7 @@ class Engine:
         self.risk = RiskEngine(
             self.features, timeframe=config.risk.timeframe,
             shrinkage=config.risk.shrinkage, limits=config.risk.limits,
+            min_observations=config.risk.min_observations,
         )
         alloc = config.allocation
         self.baseline = BaselineAllocator(**vars(alloc.baseline)) if alloc.method == "baseline" else None
@@ -102,7 +112,19 @@ class Engine:
         self.drift = DriftMonitor(config.risk.limits.max_drift)
         self.last_allocation: TargetAllocation | None = None
         self.last_stress: StressReport | None = None
-        self.decision_engine = DecisionEngine(config.decision, self.tax)
+        ex = config.execution
+        self.volume = VolumeTracker(ex.volume_timeframe)
+        self.cost_model = ExecutionCostModel(ex.cost)
+        self.fill_model = FillModel(ex.max_participation)
+        self.optimizer = OrderOptimizer(ex.optimizer, self.cost_model, self.fill_model, self.volume)
+        self.execution_feedback = ExecutionFeedback(
+            self.fill_model, self.cost_model, learn_impact=ex.learn_impact
+        )
+        self.broker = PaperBroker(ex.fill_share) if ex.mode == "paper" else None
+        self.last_plan: ExecutionPlan | None = None
+        self.plans: deque[ExecutionPlan] = deque(maxlen=500)
+        self.fills: list[Fill] = []
+        self.decision_engine = DecisionEngine(config.decision, self.tax, self.cost_model)
         self.last_decision: Decision | None = None
         self.decisions: deque[Decision] = deque(maxlen=500)
         self.alert_engine = AlertEngine(config.alerts)
@@ -188,6 +210,7 @@ class Engine:
             initial,
             seed=feed_cfg.seed,
             tick_seconds=feed_cfg.tick_seconds,
+            annual_vol=feed_cfg.annual_vol,
             max_events=self.config.engine.max_events,
         )
 
@@ -205,6 +228,14 @@ class Engine:
         for bar in sorted(closed, key=lambda b: (b.end, b.timeframe, b.symbol)):
             await self.bus.publish(bar)
 
+        if self.broker is not None:
+            update = self.broker.on_trade(event)
+            for fill in update.fills:
+                self.fills.append(fill)
+                self.record_fill(fill.symbol, fill.quantity, fill.price, fill.timestamp)
+            for wo in update.closed:
+                self.execution_feedback.on_order_closed(wo.order, wo.filled, wo.average_price)
+
         self.trade_count += 1
         every = self.config.engine.report_every
         if self.reporter is not None and every > 0 and self.trade_count % every == 0:
@@ -218,6 +249,8 @@ class Engine:
         self.market_state.update(event)
         self.features.on_bar(event)
         self.models.on_bar(event)
+        if event.timeframe == self.volume.timeframe and not event.payload.get("correction"):
+            self.volume.update(event.symbol, event.volume)
         if event.timeframe == self.config.allocation.rebalance_timeframe:
             self._interval_due = True
 
@@ -233,11 +266,112 @@ class Engine:
         status = self.evaluate_safety()
         if self.config.allocation.method != "static" and status.can_decide:
             self._reallocate(status)
+        if not status.can_decide and self.broker is not None:
+            for wo in self.broker.cancel_all():       # HALTED : plus aucun ordre en cours
+                self.execution_feedback.on_order_closed(wo.order, wo.filled, wo.average_price)
         decision = None
         if self.config.decision.enabled:
             decision = self.decide(status)
             await self._publish_decision(decision)
+            if decision.action == "UREBALANCE" and self.config.execution.mode != "off":
+                self.execute(self.plan_execution(decision, status))
         await self._publish_alerts(status, decision)
+
+    def _daily_vols(self, symbols: list[str]) -> dict[str, float]:
+        cov = self.risk.covariance(symbols)
+        if cov is None:
+            return {}
+        return {s: math.sqrt(max(cov[i, i], 0.0) / 252) for i, s in enumerate(symbols) if cov[i, i] > 0}
+
+    def _quote(self, symbol: str) -> tuple[float, float] | None:
+        ms = self.market_state.get(symbol)
+        if ms is None:
+            return None
+        if ms.bid and ms.ask and ms.ask >= ms.bid:
+            return ms.bid, ms.ask
+        half = ms.price * self.config.execution.cost.default_spread_bps * 1e-4 / 2
+        return ms.price - half, ms.price + half
+
+    def plan_execution(self, decision: Decision, status: SafetyStatus) -> ExecutionPlan:
+        """Transforme un UREBALANCE en ordres proposés, contrôlés par les hard controls."""
+        symbols = self.universe()
+        vols = self._daily_vols(symbols)
+        value_total = max(decision.risk_benefit, 0.0) + max(decision.alpha_benefit, 0.0)
+        traded = sum(abs(d.notional) for d in decision.symbols.values())
+        state = self._raw_snapshot()
+        orders, rejected, notes = [], [], []
+        # Achats plafonnés au cash disponible (hors cash minimum), sans compter
+        # le produit des ventes qui pourraient ne pas être exécutées : pas de
+        # levier involontaire. Les ventes passent en premier.
+        cash_available = state.cash - self.config.allocation.constraints.min_cash * state.total_value
+        by_side = sorted(decision.symbols.items(), key=lambda kv: (kv[1].notional > 0, kv[0]))
+        for sym, d in by_side:
+            quote = self._quote(sym)
+            if abs(d.notional) < 1e-9 or quote is None or decision.timestamp is None:
+                continue
+            value = value_total * abs(d.notional) / traded if traded else 0.0
+            order = self.optimizer.optimize(
+                sym, d.notional, value, decision.urgency, bid=quote[0], ask=quote[1],
+                daily_vol=vols.get(sym), timestamp=decision.timestamp, decision_id=decision.decision_id,
+            )
+            if order is None:
+                notes.append(f"{sym}: quantité arrondie à zéro")
+                continue
+            ms = self.market_state.get(sym)
+            recent_volume = self.volume.expected_volume(sym, order.duration)
+            # Les plafonds connus (taille d'ordre, participation) sont respectés
+            # dès le plan : l'ordre est réduit, le reste sera traité par les
+            # décisions suivantes. Les hard controls restent le veto final.
+            cap = self.hard_controls.max_order_quantity(
+                order.limit_price, state.total_value, recent_volume, order.timestamp
+            )
+            if abs(order.quantity) > cap:
+                qty = float(math.trunc(cap)) if not self.config.execution.optimizer.allow_fractional else cap
+                if qty <= 0:
+                    notes.append(f"{sym}: plafond d'ordre nul")
+                    continue
+                notes.append(f"{sym}: ordre réduit de {abs(order.quantity):.0f} à {qty:.0f} (plafonds)")
+                order = dataclasses.replace(order, quantity=qty if order.quantity > 0 else -qty)
+            if order.quantity > 0:
+                affordable = max(0.0, cash_available) / order.limit_price
+                if not self.config.execution.optimizer.allow_fractional:
+                    affordable = float(math.trunc(affordable))
+                if affordable <= 0:
+                    notes.append(f"{sym}: achat impossible, cash insuffisant")
+                    continue
+                if order.quantity > affordable:
+                    notes.append(f"{sym}: achat réduit de {order.quantity:.0f} à {affordable:.0f} (cash)")
+                    order = dataclasses.replace(order, quantity=affordable)
+            verdict = self.hard_controls.check_order(
+                order, portfolio_value=state.total_value,
+                last_price=None if ms is None else ms.price,
+                recent_volume=recent_volume,
+                safety_state=status.state,
+            )
+            if verdict.approved:
+                orders.append(order)
+                if order.quantity > 0:
+                    cash_available -= order.notional
+            else:
+                rejected.append(RejectedOrder(order, verdict.violations))
+                self.safety.record_hard_control_rejection(order.timestamp, "; ".join(verdict.violations))
+        plan = ExecutionPlan(
+            decision_id=decision.decision_id, timestamp=decision.timestamp, orders=tuple(orders),
+            rejected=tuple(rejected), expected_cost=sum(o.expected_cost or 0.0 for o in orders),
+            execution_confidence=self.execution_feedback.execution_confidence, notes=tuple(notes),
+        )
+        self.last_plan = plan
+        self.plans.append(plan)
+        return plan
+
+    def execute(self, plan: ExecutionPlan) -> None:
+        """Paper : remplace les ordres en cours par ceux du nouveau plan."""
+        if self.broker is None:
+            return                                   # mode proposals : un humain décide
+        for wo in self.broker.cancel_all():
+            self.execution_feedback.on_order_closed(wo.order, wo.filled, wo.average_price)
+        for order in plan.orders:
+            self.broker.submit(order)
 
     def decision_context(self, status: SafetyStatus) -> DecisionContext:
         state = self._raw_snapshot()
@@ -264,6 +398,9 @@ class Engine:
             robustness=None if self.last_allocation is None else self.last_allocation.robustness,
             portfolio_risk=None if self.risk_report is None else self.risk_report.portfolio_vol,
             model_agreement=None if ens is None else ens.effective_models() / len(ens.names),
+            daily_vols=self._daily_vols(symbols),
+            adv={s: self.volume.adv(s) for s in symbols},
+            execution_confidence=self.execution_feedback.execution_confidence,
         )
 
     def decide(self, status: SafetyStatus) -> Decision:

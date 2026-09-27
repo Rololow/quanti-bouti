@@ -52,11 +52,13 @@ class RiskEngine:
         timeframe: str = "1h",
         shrinkage: float = 0.1,
         limits: RiskLimits | None = None,
+        min_observations: int = 20,
     ) -> None:
         self.features = features
         self.timeframe = timeframe
         self.shrinkage = shrinkage
         self.limits = limits or RiskLimits()
+        self.min_observations = min_observations
         self.portfolio_drawdown = DrawdownTracker()
         self._price_drawdowns: dict[str, DrawdownTracker] = {}
 
@@ -67,7 +69,8 @@ class RiskEngine:
         self._price_drawdowns.setdefault(symbol, DrawdownTracker()).update(price, timestamp)
 
     def covariance(self, symbols: list[str]) -> np.ndarray | None:
-        return annualized_covariance(self.features, symbols, self.timeframe, shrinkage=self.shrinkage)
+        return annualized_covariance(self.features, symbols, self.timeframe,
+                                     shrinkage=self.shrinkage, min_updates=self.min_observations)
 
     def evaluate(self, state: PortfolioState) -> RiskReport:
         total = state.total_value

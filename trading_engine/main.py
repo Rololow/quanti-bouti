@@ -90,6 +90,25 @@ def print_decision(engine: Engine) -> None:
                       f"(cible {sd.target_weight:.1%}) {sd.notional:+,.0f}")
 
 
+def print_execution(engine: Engine) -> None:
+    plan = engine.last_plan
+    fb = engine.execution_feedback
+    mode = engine.config.execution.mode
+    print(f"  execution ({mode}): fills={len(engine.fills)} ordres clos={len(fb.records)} "
+          f"confiance={fb.execution_confidence:.2f} calibration fill={engine.fill_model.calibration:.2f} "
+          f"η impact={engine.cost_model.eta:.2f} TOB payée={engine.tax.transaction_taxes_paid if engine.tax else 0:.2f}")
+    if plan is None:
+        return
+    print(f"    dernier plan {plan.decision_id}: {len(plan.orders)} ordre(s), "
+          f"{len(plan.rejected)} rejeté(s), coût attendu {plan.expected_cost:.2f}")
+    for o in plan.orders:
+        print(f"    {o.side.upper():<4} {o.symbol:<5} {abs(o.quantity):>6.0f} @ {o.limit_price:.2f} "
+              f"agressivité {o.aggressiveness:.1f} durée {int(o.duration.total_seconds() // 60)}min "
+              f"fill attendu {_fmt(o.expected_fill, '.0%')} participation {_fmt(o.participation, '.1%')}")
+    for r in plan.rejected:
+        print(f"    REJETÉ {r.order.symbol}: {'; '.join(r.violations)}")
+
+
 def print_alerts(engine: Engine, last: int = 5) -> None:
     recent = list(engine.alerts)[-last:]
     if recent:
@@ -186,6 +205,7 @@ async def _run(config_path: str) -> None:
         print_safety(engine)
         print_tax(engine)
         print_decision(engine)
+        print_execution(engine)
         print_alerts(engine)
         print_allocation(engine)
         print_feed_status(engine)

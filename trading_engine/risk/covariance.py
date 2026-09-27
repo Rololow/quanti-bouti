@@ -47,17 +47,20 @@ def annualized_covariance(
     cov = np.zeros((n, n))
     known = np.zeros(n, dtype=bool)
 
-    if timeframe in features.covariance_timeframes and features.correlation_updates(timeframe) >= min_updates:
-        cov_symbols, raw = features.covariance(timeframe)
-        index = {sym: i for i, sym in enumerate(cov_symbols)}
-        idx = [index.get(sym) for sym in symbols]
-        for a, ia in enumerate(idx):
-            if ia is None:
-                continue
-            known[a] = True
-            for b, ib in enumerate(idx):
-                if ib is not None:
-                    cov[a, b] = raw[ia, ib] * scale
+    # Trop peu d'observations : pas de covariance du tout (une allocation
+    # calculée sur 2 barres donnerait des poids extrêmes).
+    if timeframe not in features.covariance_timeframes or features.correlation_updates(timeframe) < min_updates:
+        return None
+    cov_symbols, raw = features.covariance(timeframe)
+    index = {sym: i for i, sym in enumerate(cov_symbols)}
+    idx = [index.get(sym) for sym in symbols]
+    for a, ia in enumerate(idx):
+        if ia is None:
+            continue
+        known[a] = True
+        for b, ib in enumerate(idx):
+            if ib is not None:
+                cov[a, b] = raw[ia, ib] * scale
 
     for a, sym in enumerate(symbols):
         if not known[a]:

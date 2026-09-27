@@ -188,7 +188,7 @@ def test_engine_decides_every_interval_and_logs(tmp_path):
     cfg = load_config()
     log = tmp_path / "decisions.jsonl"
     cfg = dataclasses.replace(
-        cfg,
+        cfg, risk=dataclasses.replace(cfg.risk, min_observations=5),  # 8000 événements = 11 h
         engine=dataclasses.replace(cfg.engine, max_events=8000, report_every=0),
         allocation=dataclasses.replace(cfg.allocation, method="hrp"),
         storage=dataclasses.replace(cfg.storage, decision_log=str(log)),

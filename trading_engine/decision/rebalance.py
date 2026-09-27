@@ -9,7 +9,8 @@ Tout est exprimé en unités économiques (devise du portefeuille, V = valeur) :
     risque(f)       = V · γ/2 · H · [TE²(w_courant) - TE²(w_f)]  (H = période de détention)
     alpha(f)        = V · Σ_i (w_f,i - w_c,i) · μ_i · fiabilité_i
     coûts(f)        = spread + slippage + commissions + taxes (TOB, plus-values)
-    σ(f)            = sqrt(σ_alpha² + ((1 - robustesse) · risque(f))²)
+    σ(f)            = sqrt(σ_alpha² + ((1 - robustesse) · risque(f))² + σ_exec²)
+    σ_exec          = coûts d'exécution · (1 - confiance d'exécution)
     σ_alpha         = V · sqrt(Σ_i ((w_f,i - w_c,i) · se_i)²)
     se_i            = std_i / sqrt(n_obs_i) + désaccord_i
 
@@ -17,6 +18,11 @@ Tout est exprimé en unités économiques (devise du portefeuille, V = valeur) :
 des modèles), pas le bruit du rendement réalisé : ce bruit est le risque de
 marché, déjà valorisé par le terme de risque. Le compter deux fois écraserait
 toute décision.
+
+σ_exec traduit la séparation MODEL ≠ EXECUTION CONFIDENCE (README §49.8) :
+tant que les modèles d'exécution reposent sur des hypothèses (confiance 0),
+leur coût estimé compte double ; il n'est pas ajouté si la confiance
+d'exécution n'est pas fournie.
     net(f)          = risque(f) + alpha(f) - coûts(f) - k · σ(f)
 
 avec w_f = w_c + f · (w_target - w_c) pour f dans `fractions` (rebalancement
@@ -41,6 +47,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from trading_engine.execution.cost_model import ExecutionCostModel
 from trading_engine.signals.signal import Signal
 from trading_engine.tax.tax_model import TaxModel
 from trading_engine.timeutils import periods_per_year
@@ -83,10 +90,16 @@ class CostBreakdown:
     commission: float = 0.0
     transaction_tax: float = 0.0
     capital_gains_tax: float = 0.0
+    impact: float = 0.0
+
+    @property
+    def execution(self) -> float:
+        """Coûts qui dépendent de la façon d'exécuter (hors taxes)."""
+        return self.spread + self.slippage + self.impact + self.commission
 
     @property
     def total(self) -> float:
-        return self.spread + self.slippage + self.commission + self.transaction_tax + self.capital_gains_tax
+        return self.execution + self.transaction_tax + self.capital_gains_tax
 
 
 @dataclass(frozen=True)
@@ -142,12 +155,21 @@ class DecisionContext:
     robustness: float | None = None
     portfolio_risk: float | None = None
     model_agreement: float | None = None
+    daily_vols: Mapping[str, float] = field(default_factory=dict)
+    adv: Mapping[str, float | None] = field(default_factory=dict)
+    execution_confidence: float | None = None
 
 
 class DecisionEngine:
-    def __init__(self, config: DecisionConfig | None = None, tax: TaxModel | None = None) -> None:
+    def __init__(
+        self,
+        config: DecisionConfig | None = None,
+        tax: TaxModel | None = None,
+        cost_model: ExecutionCostModel | None = None,
+    ) -> None:
         self.config = config or DecisionConfig()
         self.tax = tax
+        self.cost_model = cost_model
         self._horizon_years = 1.0 / periods_per_year(self.config.holding_period)
         self._counter = 0
 
@@ -164,9 +186,21 @@ class DecisionEngine:
 
     def _costs(self, ctx: DecisionContext, trades: Mapping[str, float]) -> CostBreakdown:
         cfg = self.config
-        spread = slippage = commission = 0.0
+        spread = slippage = commission = impact = 0.0
         for sym, notional in trades.items():
             if abs(notional) < 1e-9:
+                continue
+            price = ctx.prices.get(sym)
+            if self.cost_model is not None and price:
+                # Même modèle que l'exécution ; hypothèse prudente : l'ordre croise le spread.
+                est = self.cost_model.estimate(
+                    notional / price, price, rel_spread=ctx.spreads.get(sym), crossing=1.0,
+                    daily_vol=ctx.daily_vols.get(sym), adv=ctx.adv.get(sym),
+                )
+                spread += est.spread
+                slippage += est.slippage
+                impact += est.impact
+                commission += est.fees
                 continue
             rel_spread = ctx.spreads.get(sym, cfg.default_spread_bps * 1e-4)
             spread += abs(notional) * rel_spread / 2.0
@@ -176,7 +210,7 @@ class DecisionEngine:
         if self.tax is not None and ctx.timestamp is not None and trades:
             tax_cost = self.tax.rebalance_cost(trades, ctx.prices, ctx.timestamp)
             tx, cg = tax_cost.transaction_tax, tax_cost.capital_gains_tax
-        return CostBreakdown(spread, slippage, commission, tx, cg)
+        return CostBreakdown(spread, slippage, commission, tx, cg, impact)
 
     def _nothing(
         self, ctx: DecisionContext, reasons: list[str],
@@ -267,6 +301,9 @@ class DecisionEngine:
             sigma = math.sqrt(sigma_alpha**2 + ((1 - robustness) * risk_benefit) ** 2)
             trades = {s: float(dw[i] * V) for i, s in enumerate(symbols) if abs(dw[i]) > 1e-12}
             costs = self._costs(ctx, trades)
+            if ctx.execution_confidence is not None:
+                sigma_exec = costs.execution * (1.0 - ctx.execution_confidence)
+                sigma = math.sqrt(sigma**2 + sigma_exec**2)
             net = risk_benefit + alpha - costs.total - cfg.k_sigma * sigma
             candidate = (net, f, w_f, risk_benefit, alpha, costs, sigma, trades)
             if best is None or net > best[0]:
@@ -297,7 +334,8 @@ class DecisionEngine:
             model_agreement=ctx.model_agreement,
             data_quality=min(ctx.data_scores.values(), default=None),
             robustness=ctx.robustness, portfolio_risk=ctx.portfolio_risk,
-            safety_state=ctx.safety_state, reasons=tuple(reasons), **diag,
+            safety_state=ctx.safety_state, reasons=tuple(reasons),
+            execution_confidence=ctx.execution_confidence, **diag,
         )
 
     @staticmethod
@@ -310,7 +348,7 @@ class DecisionEngine:
             f"écart de risque à la cible (TE {te:.2%}) : bénéfice {risk_benefit:+.2f}",
             f"alpha attendu (pondéré par la fiabilité) : {alpha:+.2f}",
             f"coûts {costs.total:.2f} (spread {costs.spread:.2f}, slippage {costs.slippage:.2f}, "
-            f"taxes {costs.transaction_tax + costs.capital_gains_tax:.2f})",
+            f"impact {costs.impact:.2f}, taxes {costs.transaction_tax + costs.capital_gains_tax:.2f})",
             f"incertitude {sigma:.2f} ; net {net:+.2f} à {f:.0%} du chemin",
         ]
         reasons += [

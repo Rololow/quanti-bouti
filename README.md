@@ -33,7 +33,9 @@ hard controls indépendants des modèles), Phase 9 (MODEL_DEGRADED des HMM,
 fiabilité des prédicteurs par régime, ensemble pondéré par la corrélation des
 erreurs, stress tests de la cible, tests de perturbation), Phase 12 (Decision
 Engine UREBALANCE / UDONOTHING en unités économiques avec coûts et taxes,
-rebalancement partiel, hystérésis, raisons, alertes, journal des décisions) et
+rebalancement partiel, hystérésis, raisons, alertes, journal des décisions),
+Phase 13 (exécution : coûts et impact, fill model, pricer, optimiseur
+d'ordres, paper broker, boucle de feedback et confiance d'exécution) et
 profils fiscaux par pays (TOML, Belgique fournie).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
@@ -1371,6 +1373,30 @@ LT valable plusieurs mois : l'urgence dépend de la demi-vie du signal.
 
 ---
 
+### Implémentation (`execution/`)
+
+```text
+cost_model     spread (selon l'agressivité) + slippage + impact η·σ_jour·sqrt(Q/ADV) + frais
+fill_model     P(touch) = 2·(1 - Φ(d / σ_Δt)) × part du volume de marché × calibration
+order_pricer   limite = bid + a·(ask - bid) (achat), arrondie au tick
+optimizer      grille (agressivité, durée) : U = P_fill·(V(Δt) - C_exec) - C_risk
+feedback       fills observés -> calibration du fill, η (hors paper), confiance d'exécution
+paper_broker   exécution simulée au prix limite sur le flux ; jamais d'ordre réel
+```
+
+Le plan d'exécution respecte dès sa construction les plafonds connus
+(taille d'ordre, participation, budget de turnover du jour, cash
+disponible, ventes d'abord) : les hard controls restent le veto final pour
+les ordres anormaux, pas un mécanisme de dimensionnement. La décision utilise
+le même modèle de coût, et tant que la confiance d'exécution est faible,
+l'incertitude sur ces coûts élargit σ (MODEL ≠ EXECUTION CONFIDENCE).
+
+`execution.mode` : `off`, `proposals` (ordres proposés à un humain) ou
+`paper` (exécution simulée). En paper, l'impact n'est pas appris (les fills
+simulés ne le reflètent pas).
+
+---
+
 # 33. Order Optimizer
 
 Il peut optimiser :
@@ -2564,14 +2590,15 @@ Le moteur :
 ## Phase 13 — Execution
 
 ```text
-[ ] Cost model (spread, slippage, fees)
-[ ] Impact model / participation
-[ ] Fill model
-[ ] Execution confidence
-[ ] Order pricer
-[ ] Order optimizer
-[ ] Order proposals
-[ ] Execution feedback loop
+[x] Cost model (spread, slippage, fees)
+[x] Impact model / participation
+[x] Fill model
+[x] Execution confidence
+[x] Order pricer
+[x] Order optimizer
+[x] Order proposals
+[x] Execution feedback loop
+[x] Paper broker (aucun ordre réel)
 ```
 
 ## Phase 14 — Dashboard

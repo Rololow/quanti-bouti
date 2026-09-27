@@ -113,6 +113,7 @@ def _config(**alloc):
         cfg,
         engine=dataclasses.replace(cfg.engine, report_every=0),
         allocation=dataclasses.replace(cfg.allocation, **alloc),
+        risk=dataclasses.replace(cfg.risk, min_observations=5),  # 8000 événements = 11 h
     )
 
 

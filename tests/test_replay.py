@@ -19,7 +19,9 @@ def _config(**overrides):
     storage = dataclasses.replace(cfg.storage, **overrides.pop("storage", {}))
     allocation = dataclasses.replace(cfg.allocation, **overrides.pop("allocation", {}))
     return dataclasses.replace(cfg, engine=engine, feed=feed, storage=storage,
-                               allocation=allocation, **overrides)
+                               allocation=allocation,
+                               risk=dataclasses.replace(cfg.risk, min_observations=5),  # 8000 événements = 11 h
+                               **overrides)
 
 
 def test_event_roundtrip(t0):

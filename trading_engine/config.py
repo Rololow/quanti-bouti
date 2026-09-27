@@ -13,7 +13,9 @@ from trading_engine.alerts.alerts import AlertConfig
 from trading_engine.allocation.constraints import Constraints
 from trading_engine.decision.rebalance import DecisionConfig
 from trading_engine.data.integrity import IntegrityConfig
+from trading_engine.execution.cost_model import CostConfig
 from trading_engine.execution.hard_controls import HardLimits
+from trading_engine.execution.optimizer import OptimizerConfig
 from trading_engine.safety.safety_engine import SafetyConfig
 from trading_engine.tax.profile import Instrument
 from trading_engine.risk.limits import RiskLimits
@@ -55,6 +57,7 @@ class FeedConfig:
     symbols: tuple[str, ...] = ()
     seed: int | None = None
     tick_seconds: float = 1.0
+    annual_vol: float = 0.20
     replay_path: str | None = None
     alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
 
@@ -117,6 +120,7 @@ class AllocationConfig:
 class RiskConfig:
     timeframe: str = "1h"          # barres utilisées pour la covariance
     shrinkage: float = 0.1         # vers la diagonale
+    min_observations: int = 20     # barres minimum avant toute covariance / allocation
     limits: RiskLimits = field(default_factory=RiskLimits)
 
 
@@ -174,6 +178,24 @@ class RobustnessConfig:
 
 
 @dataclass(frozen=True)
+class ExecutionConfig:
+    # off : pas d'ordres ; proposals : ordres proposés (pour un humain) ;
+    # paper : ordres exécutés de façon simulée sur le flux. Aucun ordre réel
+    # n'est jamais envoyé à un broker.
+    mode: str = "paper"
+    volume_timeframe: str = "5m"
+    max_participation: float = 0.10
+    fill_share: float = 1.0
+    learn_impact: bool = False
+    cost: CostConfig = field(default_factory=CostConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("off", "proposals", "paper"):
+            raise ValueError(f"execution.mode must be off, proposals or paper, got {self.mode!r}")
+
+
+@dataclass(frozen=True)
 class TaxConfig:
     profile: str | None = None                     # ex. config/taxes/BE.toml ; None = pas de fiscalité
     step_up_prices: Mapping[str, float] = field(default_factory=dict)
@@ -198,6 +220,7 @@ class Config:
     robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -245,6 +268,7 @@ class Config:
                 symbols=tuple(feed.get("symbols", ())),
                 seed=feed.get("seed"),
                 tick_seconds=float(feed.get("tick_seconds", 1.0)),
+                annual_vol=float(feed.get("annual_vol", 0.20)),
                 replay_path=feed.get("replay_path"),
                 alpaca=AlpacaConfig(**(feed.get("alpaca") or {})),
             ),
@@ -283,6 +307,7 @@ class Config:
                 k: tuple(v) if k == "fractions" else v
                 for k, v in (raw.get("decision") or {}).items()
             }),
+            execution=_execution_config(raw.get("execution") or {}),
             alerts=AlertConfig(**{
                 k: tuple(v) if k == "regime_horizons" else v
                 for k, v in (raw.get("alerts") or {}).items()
@@ -298,6 +323,16 @@ class Config:
                 ensemble=EnsembleConfig(**(models.get("ensemble") or {})),
             ),
         )
+
+
+def _execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
+    raw = dict(raw)
+    cost = CostConfig(**(raw.pop("cost", None) or {}))
+    opt = dict(raw.pop("optimizer", None) or {})
+    for key in ("aggressiveness", "durations"):
+        if key in opt:
+            opt[key] = tuple(opt[key])
+    return ExecutionConfig(cost=cost, optimizer=OptimizerConfig(**opt), **raw)
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:

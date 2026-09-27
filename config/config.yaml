@@ -16,6 +16,7 @@ feed:
   seed: 42
   # Intervalle entre deux trades simulés (secondes de temps de marché).
   tick_seconds: 5.0
+  annual_vol: 0.20        # volatilité annualisée simulée (convention 252 × 6h30)
   alpaca:
     # "iex" (plan gratuit) ou "sip" (plan payant). url permet de forcer un
     # autre endpoint, ex. wss://stream.data.alpaca.markets/v2/test.
@@ -107,6 +108,7 @@ models:
 risk:
   timeframe: 1h          # barres utilisées pour la covariance
   shrinkage: 0.1         # shrinkage de la covariance vers sa diagonale
+  min_observations: 20   # barres minimum avant toute covariance (et donc allocation)
   limits:
     max_weight: 0.40
     max_gross_leverage: 1.0
@@ -125,12 +127,38 @@ decision:
   no_trade_band: 0.02       # hystérésis : |cible - poids| < 2 % -> on ne touche pas
   fractions: [0.25, 0.5, 1.0]   # rebalancement partiel : part du chemin évaluée
   min_net_benefit: 0.0
-  default_spread_bps: 5.0   # si aucune quote disponible
+  # Utilisés seulement si aucun modèle de coût d'exécution n'est branché
+  # (sinon : execution.cost, le même modèle que l'exécution).
+  default_spread_bps: 5.0
   slippage_bps: 2.0
-  commission_per_order: 0.0 # Alpaca : 0
+  commission_per_order: 0.0
   min_robustness: 0.3       # stress tests : en dessous, cible jugée non fiable
   min_data_score: 0.9
   include_alpha: true
+
+execution:
+  # off | proposals | paper — aucun ordre réel n'est JAMAIS envoyé à un broker.
+  # paper : ordres exécutés de façon simulée sur le flux (au prix limite).
+  mode: paper
+  volume_timeframe: 5m      # barres utilisées pour estimer le volume de marché
+  max_participation: 0.10   # part maximale du volume de marché
+  fill_share: 1.0           # paper : part d'un trade imprimé qu'on peut prendre
+  learn_impact: false       # paper : fills simulés -> ne pas apprendre l'impact
+  cost:
+    default_spread_bps: 5.0
+    slippage_bps: 1.0
+    impact_eta: 0.5         # impact = η · σ_jour · sqrt(Q / ADV), prior à recalibrer
+    commission_per_order: 0.0
+    commission_per_share: 0.0
+    default_daily_vol: 0.015
+    default_adv: 1000000
+  optimizer:
+    aggressiveness: [0.0, 0.5, 1.0]   # 0 passif (bid/ask), 1 croise le spread
+    durations: [5m, 30m, 1h]
+    alpha_half_life: 1h     # la part alpha de la valeur décroît avec cette demi-vie
+    timing_risk_aversion: 1.0
+    allow_fractional: false
+    tick: 0.01
 
 alerts:
   vol_fast: 5m
