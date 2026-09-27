@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
+import os
 import logging
 import math
 from collections import deque
@@ -69,6 +71,8 @@ from trading_engine.execution.alpaca_trading import (
 from trading_engine.execution.paper_broker import PaperBroker
 from trading_engine.data.alpaca_history import AlpacaHistoricalClient
 from trading_engine.data.events import CalendarEvent, OrderUpdateEvent, PortfolioEvent
+from trading_engine.data.events import FxEvent, TaxLedgerEvent
+from trading_engine.tax.fx import FxRates, fetch_ecb_rates
 from trading_engine.data.calendar import MarketCalendar
 from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import portfolio_vol
@@ -182,7 +186,16 @@ class Engine:
         # Séances de marché : reçues comme CalendarEvent (journalisé).
         self.calendar: MarketCalendar | None = None
         self.market_block: str | None = None  # raison de ne pas trader au dernier intervalle
-        self._calendar_requested = False
+        self._bootstrapped = False
+        self.fx: FxRates | None = None
+        self._fx_attempt: datetime | None = None
+        # Registre fiscal persistant seulement avec un compte broker réel (paper
+        # Alpaca) : c'est lui qui garde les positions d'un démarrage à l'autre.
+        # Jamais en simulation, en replay ni avec le broker paper local.
+        ledger = config.tax.ledger_path
+        self.ledger_path = resolve_path(ledger) if ledger and self.remote_broker is not None \
+            and self.tax is not None else None
+        self.ledger_source: str | None = None
         self.last_plan: ExecutionPlan | None = None
         self.plans: deque[ExecutionPlan] = deque(maxlen=500)
         self.fills: list[Fill] = []
@@ -217,20 +230,22 @@ class Engine:
         self.bus.subscribe(EventType.ORDER_UPDATE, self._on_order_update)
         self.bus.subscribe(EventType.PORTFOLIO, self._on_portfolio_event)
         self.bus.subscribe(EventType.CALENDAR, self._on_calendar)
+        self.bus.subscribe(EventType.FX, self._on_fx)
+        self.bus.subscribe(EventType.TAX_LEDGER, self._on_tax_ledger)
 
     def _build_tax_model(self) -> TaxModel | None:
         if not self.config.tax.profile:
             return None
+        profile = load_tax_profile(resolve_path(self.config.tax.profile))
+        fx = self.config.fx
         model = TaxModel(
-            load_tax_profile(resolve_path(self.config.tax.profile)),
+            profile,
             self.config.instruments,
             self.config.tax.step_up_prices,
+            portfolio_currency=profile.currency if fx.provider == "off" else fx.portfolio_currency,
         )
-        # Positions initiales : lots fiscaux à leur prix moyen. Date inconnue :
-        # considérée antérieure à toute taxe (step-up si un prix est fourni).
-        for sym, p in self.config.portfolio.positions.items():
-            if p.quantity > 0 and model.gains is not None:
-                model.gains.buy(sym, p.quantity, p.avg_price, p.acquired or date.min)
+        # Les lots fiscaux (registre persistant ou positions initiales) arrivent
+        # au démarrage par un TaxLedgerEvent journalisé : voir `_bootstrap`.
         for warning in model.warnings():
             logger.warning("tax: %s", warning)
         return model
@@ -247,9 +262,10 @@ class Engine:
         if self.tax is not None:
             charge, _ = self.tax.record_fill(symbol, quantity, price, timestamp)
             if tax_in_cash:
-                self.portfolio.cash -= charge.amount
+                self.portfolio.cash -= charge.portfolio_amount or 0.0
             else:
-                self.taxes_outside_broker += charge.amount
+                self.taxes_outside_broker += charge.amount      # devise du profil (à déclarer)
+            self._save_ledger()
 
     def estimate_rebalance_tax(self) -> RebalanceTaxCost | None:
         """Coût fiscal estimé pour rejoindre la cible actuelle depuis les poids courants."""
@@ -419,6 +435,10 @@ class Engine:
             if self._calendar_source() is not None and \
                     self.calendar.end < self.features.now.date() + timedelta(days=5):
                 await self._load_calendar(self.features.now)
+        if (self._fx_source() == "ecb" and self.fx is not None and self.features.now is not None
+                and self.fx.last < self.features.now.date() - timedelta(days=1)
+                and (self._fx_attempt is None or utcnow() - self._fx_attempt > timedelta(hours=6))):
+            await self._load_fx(self.features.now)
         self.risk_report = self.risk.evaluate(self._raw_snapshot())
         await self._publish_breaches(self.risk_report)
         status = self.evaluate_safety()
@@ -621,20 +641,27 @@ class Engine:
             if price:
                 self.portfolio.update_price(sym, price, event.timestamp)
         if self.tax is not None and self.tax.gains is not None:
-            if kind == "sync":
-                self.tax.gains.lots.clear()
-                # Date d'achat inconnue : base fiscale = prix moyen du broker, datée
-                # de la synchronisation (pas de step-up supposé).
-                for sym, (qty, avg, _) in positions.items():
-                    if qty > 0:
-                        self.tax.gains.buy(sym, qty, avg, event.timestamp)
-            else:
-                for sym, diff in diffs.items():
-                    price = (positions.get(sym) or (0, 0, None))[2] or self.portfolio.prices.get(sym)
-                    if diff > 0 and price:
-                        self.tax.gains.buy(sym, diff, price, event.timestamp)
-                    elif diff < 0 and price:
-                        self.tax.gains.sell(sym, -diff, price, event.timestamp)
+            # Les lots du registre (dates et coûts réels) sont gardés ; seuls les
+            # écarts avec le compte sont corrigés.
+            # - sync : titres en plus -> lot au prix moyen du broker, daté du jour
+            #   (date d'achat inconnue) ; titres en moins -> lots retirés sans
+            #   plus-value (sortis hors du moteur) ;
+            # - rapprochement : fill manqué -> achat / vente au dernier prix.
+            adjusted = []
+            for sym in sorted(set(positions) | set(self.tax.gains.lots)):
+                qty, avg, price = positions.get(sym, (0.0, None, None))
+                if kind == "sync":
+                    diff = self.tax.align_lots(sym, qty, avg, event.timestamp, realize=False)
+                else:
+                    diff = self.tax.align_lots(sym, qty, price or self.portfolio.prices.get(sym),
+                                               event.timestamp, realize=True)
+                if diff:
+                    adjusted.append(f"{sym} {diff:+g}")
+            if adjusted:
+                self.alerts.append(Alert("TAX_LEDGER", None, event.timestamp,
+                                         f"lots fiscaux alignés sur le compte : {', '.join(adjusted)} (à vérifier)",
+                                         "warning"))
+            self._save_ledger()
 
     def _on_order_update(self, event: OrderUpdateEvent) -> None:
         if event.update in ("fill", "partial_fill") and event.fill_qty and event.fill_price:
@@ -665,6 +692,99 @@ class Engine:
         if provider == "alpaca":
             return "alpaca"
         return "rules" if mode == "on" else None
+
+    async def _bootstrap(self, now: datetime) -> None:
+        """Données de démarrage, injectées comme événements journalisés (le
+        replay les relit du journal) : calendrier, taux de change, registre fiscal."""
+        self._bootstrapped = True
+        if self.config.feed.provider == "replay":
+            return
+        if self._calendar_source():
+            await self._load_calendar(now)
+        if self._fx_source():
+            await self._load_fx(now)
+        await self._drain_injected()          # le registre a besoin des taux
+        if self.tax is not None:
+            self._load_ledger(now)
+        await self._drain_injected()
+
+    # ------------------------------------------------------------------ change
+
+    def _fx_source(self) -> str | None:
+        if self.tax is None or not self.tax.needs_fx or self.config.feed.provider == "replay":
+            return None
+        provider = self.config.fx.provider
+        if provider == "auto":
+            return "ecb" if self.config.feed.provider == "alpaca" else "fixed"
+        return None if provider == "off" else provider
+
+    async def _load_fx(self, now: datetime) -> None:
+        cfg = self.config.fx
+        base, quote = self.tax.profile.currency, self.tax.portfolio_currency
+        rates = None
+        self._fx_attempt = utcnow()
+        if self._fx_source() == "ecb":
+            if base != "EUR":
+                raise ValueError(f"ECB rates need EUR as tax currency, got {base}")
+            try:
+                rates = await asyncio.to_thread(fetch_ecb_rates, quote,
+                                                now.date() - timedelta(days=cfg.history_days), now.date())
+            except Exception as exc:
+                if self.fx is not None:
+                    logger.warning("ECB rates refresh failed, keeping previous rates: %s", exc)
+                    return
+                logger.warning("ECB rates failed, fixed rate %s used: %s", cfg.fixed_rate, exc)
+                self.alerts.append(Alert("FX_FALLBACK", None, now,
+                                         f"taux BCE indisponibles : {quote}/{base} fixe {cfg.fixed_rate} utilisé",
+                                         "warning"))
+        if rates is None:
+            rates = FxRates.fixed(base, quote, cfg.fixed_rate, now.date() - timedelta(days=cfg.history_days))
+        self._injected.append(FxEvent(timestamp=now, received_at=now, symbol=None,
+                                      source=f"fx_{rates.source}", payload=rates.to_payload()))
+
+    def _on_fx(self, event: FxEvent) -> None:
+        self.fx = FxRates.from_payload(event.payload)
+        if self.tax is not None:
+            self.tax.set_fx(self.fx)
+
+    # ------------------------------------------------------------------ registre fiscal
+
+    def _load_ledger(self, now: datetime) -> None:
+        """Registre au démarrage : fichier (live Alpaca), sinon vide (le compte
+        broker le remplira à la synchronisation), sinon positions initiales."""
+        source, ledger = None, None
+        if self.ledger_path is not None and self.ledger_path.exists():
+            with open(self.ledger_path, encoding="utf-8") as fh:
+                ledger, source = json.load(fh), "file"
+        elif self.remote_broker is not None and self.config.execution.sync_portfolio:
+            ledger, source = self.tax.snapshot(), "empty"
+        if ledger is None:
+            # Positions initiales de la config : date d'achat inconnue, considérée
+            # antérieure à toute taxe (step-up si un prix est fourni) ; coût
+            # converti au cours du démarrage.
+            for sym, p in self.config.portfolio.positions.items():
+                if p.quantity > 0 and self.tax.gains is not None:
+                    self.tax.gains.buy(sym, p.quantity, self.tax.to_tax(p.avg_price, now), p.acquired or date.min)
+            ledger, source = self.tax.snapshot(), "config"
+        self._injected.append(TaxLedgerEvent(timestamp=now, received_at=now, symbol=None,
+                                             source="tax_ledger", payload={"source": source, "ledger": ledger}))
+
+    def _on_tax_ledger(self, event: TaxLedgerEvent) -> None:
+        if self.tax is not None:
+            self.tax.restore(event.payload["ledger"])
+            self.ledger_source = event.payload.get("source")
+
+    def _save_ledger(self) -> None:
+        """Écriture atomique du registre (fichier temporaire puis remplacement)."""
+        if self.ledger_path is None or self.tax is None or self.ledger_source is None:
+            return
+        self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.ledger_path.with_name(self.ledger_path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.tax.snapshot(), fh, indent=1)
+        os.replace(tmp, self.ledger_path)
+
+    # ------------------------------------------------------------------ calendrier
 
     async def _load_calendar(self, now: datetime) -> None:
         start = now.date() - timedelta(days=7)
@@ -933,7 +1053,7 @@ class Engine:
             if self.integrity.check_bar(event) is None:
                 self._warmup_bar(event)
             return
-        if isinstance(event, (OrderUpdateEvent, PortfolioEvent, CalendarEvent)):
+        if isinstance(event, (OrderUpdateEvent, PortfolioEvent, CalendarEvent, FxEvent, TaxLedgerEvent)):
             # Événements du compte broker et calendrier : pas des données de
             # marché (ils ne doivent pas rafraîchir la fraîcheur d'un symbole).
             await self.bus.publish(event)
@@ -954,14 +1074,15 @@ class Engine:
 
     async def run(self) -> PortfolioState:
         try:
+            if self.config.feed.provider == "alpaca":
+                await self._bootstrap(utcnow())
             if self.remote_broker is not None and self.config.execution.sync_portfolio:
                 await self._fetch_account("sync")
                 await self._drain_injected()
             await self._warmup()
             async for event in self.feed:
-                if self.calendar is None and not self._calendar_requested and self._calendar_source():
-                    self._calendar_requested = True
-                    await self._load_calendar(event.timestamp)
+                if not self._bootstrapped:          # simulation : horloge du flux
+                    await self._bootstrap(event.timestamp)
                 # Les analyses IA et les événements produits par le moteur
                 # (compte broker) passent d'abord, et sont journalisés : même
                 # ordre en live et en replay.
@@ -975,6 +1096,7 @@ class Engine:
             for analysis in self.ai.release(None):
                 await self._ingest(analysis)
         finally:
+            self._save_ledger()
             if self.recorder is not None:
                 self.recorder.close()
             if self.decision_log is not None:

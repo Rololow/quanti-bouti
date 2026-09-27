@@ -132,6 +132,25 @@ Tout ce qui vient d'Alpaca (historique, état du compte, mises à jour d'ordres)
 est enregistré dans le journal : `feed.provider: replay` avec
 `execution.mode: alpaca_paper` rejoue la session à l'identique, sans broker.
 
+### Devises et registre fiscal
+
+Le compte Alpaca est en USD, l'impôt belge en EUR. Chaque opération est
+convertie au **cours de référence BCE** du jour (dernier cours publié ce
+jour-là ou avant) : TOB et plafonds en EUR, lots fiscaux en EUR, plus-values
+calculées en EUR (l'effet de change fait partie de la plus-value taxable).
+Les estimations fiscales utilisées par la décision restent en USD. En
+simulation, un taux fixe (`fx.fixed_rate`) est utilisé ; si la BCE est
+injoignable en live, ce taux sert de repli avec une alerte `FX_FALLBACK`.
+
+En `alpaca_paper`, le **registre fiscal** (`tax.ledger_path`, par défaut
+`data/tax_ledger.json`, jamais commité) garde d'un démarrage à l'autre les
+lots avec leur vraie date et leur coût en EUR, les plus-values réalisées
+(donc l'exonération reportée) et chaque ligne de TOB à déclarer. Il est
+écrit à chaque fill, de façon atomique. À la synchronisation, les lots du
+registre sont gardés ; seuls les écarts avec le compte sont corrigés, avec
+une alerte `TAX_LEDGER`. Taux et registre sont journalisés : le replay
+repart des mêmes valeurs.
+
 ### Calendrier de marché
 
 Avec le flux Alpaca, le moteur charge les séances officielles (`/v2/calendar`,
@@ -2754,6 +2773,8 @@ Le moteur :
 [x] Synchronisation et rapprochement du compte broker
 [x] Warm-up historique (barres Alpaca REST au démarrage)
 [x] Calendrier de marché (séances, fériés, clôtures anticipées)
+[x] Change EUR/USD (cours BCE) dans la fiscalité
+[x] Registre fiscal persistant (lots datés, plus-values, TOB à déclarer)
 ```
 
 ## Phase 14 — Dashboard

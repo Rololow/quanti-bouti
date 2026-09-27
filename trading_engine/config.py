@@ -284,7 +284,28 @@ class WarmupConfig:
 @dataclass(frozen=True)
 class TaxConfig:
     profile: str | None = None                     # ex. config/taxes/BE.toml ; None = pas de fiscalité
-    step_up_prices: Mapping[str, float] = field(default_factory=dict)
+    step_up_prices: Mapping[str, float] = field(default_factory=dict)   # devise du portefeuille
+    # Registre fiscal persistant (lots datés, plus-values, TOB). Écrit seulement
+    # en execution.mode alpaca_paper (jamais en simulation ni en replay).
+    ledger_path: str | None = None
+
+
+@dataclass(frozen=True)
+class FxConfig:
+    """Change devise du portefeuille -> devise du profil fiscal.
+    auto : taux BCE avec le flux Alpaca, taux fixe en simulation ; en replay,
+    les taux viennent du journal. ecb | fixed | off (pas de conversion)."""
+
+    provider: str = "auto"
+    portfolio_currency: str = "USD"
+    fixed_rate: float = 1.10          # unités de devise du portefeuille pour 1 unité fiscale (USD par EUR)
+    history_days: int = 400           # historique BCE chargé au démarrage
+
+    def __post_init__(self) -> None:
+        if self.provider not in ("auto", "ecb", "fixed", "off"):
+            raise ValueError(f"fx.provider must be auto|ecb|fixed|off, got {self.provider!r}")
+        if not self.fixed_rate > 0 or self.history_days < 1:
+            raise ValueError("fx.fixed_rate must be > 0 and history_days >= 1")
 
 
 @dataclass(frozen=True)
@@ -311,6 +332,7 @@ class Config:
     ai: AISettings = field(default_factory=AISettings)
     warmup: WarmupConfig = field(default_factory=WarmupConfig)
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
+    fx: FxConfig = field(default_factory=FxConfig)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -403,6 +425,7 @@ class Config:
             ai=AISettings(**(raw.get("ai") or {})),
             warmup=WarmupConfig(**(raw.get("warmup") or {})),
             calendar=CalendarConfig(**(raw.get("calendar") or {})),
+            fx=FxConfig(**(raw.get("fx") or {})),
             alerts=AlertConfig(**{
                 k: tuple(v) if k == "regime_horizons" else v
                 for k, v in (raw.get("alerts") or {}).items()

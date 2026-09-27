@@ -70,10 +70,17 @@ def print_tax(engine: Engine) -> None:
     if cost is None:
         return
     value = engine.portfolio.total_value()
-    print(f"  tax ({engine.tax.profile.country}): rejoindre la cible coûterait "
-          f"{engine.tax.profile.transaction_tax_name} {cost.transaction_tax:,.2f} + "
-          f"plus-values {cost.capital_gains_tax:,.2f} = {cost.total:,.2f} "
+    tax = engine.tax
+    print(f"  tax ({tax.profile.country}): rejoindre la cible coûterait "
+          f"{tax.profile.transaction_tax_name} {cost.transaction_tax:,.2f} + "
+          f"plus-values {cost.capital_gains_tax:,.2f} = {cost.total:,.2f} {tax.portfolio_currency} "
           f"({cost.total / value:.3%} du portefeuille)")
+    if engine.fx is not None and engine.features.now is not None:
+        now = engine.features.now
+        print(f"  fx: {engine.fx.base}/{engine.fx.quote} {engine.fx.rate(now):.4f} ({engine.fx.source}, {engine.fx.last}) "
+              f"valeur {engine.fx.to_base(value, now):,.2f} {tax.profile.currency} "
+              f"TOB {tax.transaction_taxes_paid:,.2f} {tax.profile.currency} "
+              f"registre={engine.ledger_source or '-'}")
 
 
 def print_decision(engine: Engine) -> None:
@@ -103,11 +110,11 @@ def print_execution(engine: Engine) -> None:
     mode = engine.config.execution.mode
     print(f"  execution ({mode}): fills={len(engine.fills)} ordres clos={len(fb.records)} "
           f"confiance={fb.execution_confidence:.2f} calibration fill={engine.fill_model.calibration:.2f} "
-          f"η impact={engine.cost_model.eta:.2f} TOB payée={engine.tax.transaction_taxes_paid if engine.tax else 0:.2f}")
+          f"η impact={engine.cost_model.eta:.2f}")
     remote = engine.remote_broker
     if remote is not None:
         print(f"    compte Alpaca paper : ordres en cours={len(remote.working)} rejets broker={engine.remote_errors} "
-              f"oubliés={remote.forgotten} taxes dues hors broker={engine.taxes_outside_broker:.2f}")
+              f"oubliés={remote.forgotten} taxes dues hors broker={engine.taxes_outside_broker:.2f} {engine.tax.profile.currency if engine.tax else ''}")
     if plan is None:
         return
     print(f"    dernier plan {plan.decision_id}: {len(plan.orders)} ordre(s), "

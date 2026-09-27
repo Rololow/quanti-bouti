@@ -33,6 +33,8 @@ class EventType(str, Enum):
     NEWS_ANALYSIS = "news_analysis"
     ORDER_UPDATE = "order_update"
     CALENDAR = "calendar"
+    FX = "fx"
+    TAX_LEDGER = "tax_ledger"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -149,6 +151,20 @@ class CalendarEvent(Event):
     """Séances de marché (payload : `MarketCalendar.to_payload()`)."""
 
     event_type = EventType.CALENDAR
+
+
+@dataclass(frozen=True, kw_only=True)
+class FxEvent(Event):
+    """Taux de change (payload : `FxRates.to_payload()`)."""
+
+    event_type = EventType.FX
+
+
+@dataclass(frozen=True, kw_only=True)
+class TaxLedgerEvent(Event):
+    """État du registre fiscal au démarrage (payload : `source`, `ledger`)."""
+
+    event_type = EventType.TAX_LEDGER
 
 
 @dataclass(frozen=True, kw_only=True)

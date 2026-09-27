@@ -282,8 +282,21 @@ tax:
   # Voir config/taxes/BE.toml : à vérifier avant tout usage réel.
   profile: config/taxes/BE.toml
   # Prix de référence au 31/12/2025 des positions détenues avant la taxe sur
-  # les plus-values (valeur d'acquisition fiscale), ex. {SPY: 640.0}.
+  # les plus-values, en devise du portefeuille (convertis au cours BCE du
+  # 31/12/2025), ex. {SPY: 640.0}.
   step_up_prices: {}
+  # Registre fiscal persistant : lots datés (en EUR), plus-values réalisées,
+  # lignes de TOB à déclarer. Écrit seulement en execution.mode alpaca_paper.
+  ledger_path: data/tax_ledger.json
+
+fx:
+  # Le compte est en USD, l'impôt en EUR : conversion au cours BCE du jour de
+  # chaque opération (plus-values : l'effet de change est taxable).
+  # auto : BCE avec le flux Alpaca, taux fixe en simulation. ecb | fixed | off
+  provider: auto
+  portfolio_currency: USD
+  fixed_rate: 1.10          # USD pour 1 EUR (simulation, et repli si la BCE est injoignable)
+  history_days: 400
 
 # Classification fiscale des instruments (utilisée par les règles du profil).
 #   asset_class: stock | etf | fund | bond

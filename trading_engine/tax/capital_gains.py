@@ -87,6 +87,11 @@ class CapitalGainsTracker:
                 lots.popleft()
         return covered, basis
 
+    def remove(self, symbol: str, quantity: float) -> float:
+        """Retire des lots (FIFO) sans plus-value : titres sortis hors du
+        suivi (transfert, écart de synchronisation). Retourne la quantité retirée."""
+        return self._consume(symbol, quantity, commit=True)[0]
+
     def preview_sale(self, symbol: str, quantity: float) -> tuple[float, float]:
         """(quantité couverte, base fiscale) d'une vente, sans modifier les lots."""
         return self._consume(symbol, quantity, commit=False)

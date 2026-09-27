@@ -610,8 +610,13 @@ function renderTax(st) {
   if (t) {
     nodes.push(el("div", { class: "meta" }, el("span", { class: "chip" }, `profil ${t.country}`),
       t.verified ? null : statusBadge("non vérifié", "warning")));
-    nodes.push(el("div", { style: "margin-top:10px" }, `TOB payée : ${money(t.transaction_taxes_paid)}`));
-    if (t.rebalance_cost) nodes.push(el("div", { class: "secondary" }, `Rejoindre la cible coûterait ${money(t.rebalance_cost.total)} (TOB ${money(t.rebalance_cost.transaction_tax)}, plus-values ${money(t.rebalance_cost.capital_gains_tax)})`));
+    const ccy = t.currency, pccy = t.portfolio_currency;
+    nodes.push(el("div", { style: "margin-top:10px" }, `TOB : ${money(t.transaction_taxes_paid)} ${ccy}`
+      + (t.taxes_outside_broker ? ` (dont ${money(t.taxes_outside_broker)} ${ccy} à déclarer soi-même)` : "")));
+    if (t.fx) nodes.push(el("div", { class: "secondary" },
+      `Valeur : ${money(t.fx.total_value_tax)} ${ccy} · ${t.fx.pair} ${num(t.fx.rate)} (${t.fx.source}, ${t.fx.date || "–"})`));
+    if (t.rebalance_cost) nodes.push(el("div", { class: "secondary" }, `Rejoindre la cible coûterait ${money(t.rebalance_cost.total)} ${pccy} (TOB ${money(t.rebalance_cost.transaction_tax)}, plus-values ${money(t.rebalance_cost.capital_gains_tax)})`));
+    if (t.ledger && t.ledger.source) nodes.push(el("div", { class: "secondary" }, `Registre fiscal : ${t.ledger.source}${t.ledger.path ? " → " + t.ledger.path : " (non persistant)"}`));
     nodes.push(el("ul", { class: "reasons" }, t.warnings.map((w) => el("li", {}, w))));
   } else nodes.push(empty("Pas de profil fiscal."));
   const scores = st.positions.map((p) => `${p.symbol} ${num(p.data_score)}`).join(" · ");

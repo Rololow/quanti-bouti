@@ -52,6 +52,14 @@ def _signal(sig) -> dict | None:
     }
 
 
+def _fx(engine, total_value: float) -> dict | None:
+    fx, now = engine.fx, engine.features.now
+    if fx is None or not len(fx) or now is None:
+        return None
+    return {"pair": f"{fx.base}/{fx.quote}", "source": fx.source, "rate": fx.rate(now), "date": fx.last,
+            "total_value_tax": fx.to_base(total_value, now)}
+
+
 def _market(engine) -> dict | None:
     cal, now = engine.calendar, engine.features.now
     if cal is None or now is None:
@@ -190,7 +198,13 @@ def build_state(engine, *, history: int = 500, decisions: int = 50, alerts: int 
         },
         "tax": None if engine.tax is None else {
             "country": engine.tax.profile.country, "verified": engine.tax.profile.verified,
+            "currency": engine.tax.profile.currency, "portfolio_currency": engine.tax.portfolio_currency,
             "transaction_taxes_paid": engine.tax.transaction_taxes_paid,
+            "taxes_outside_broker": engine.taxes_outside_broker,
+            "fx": _fx(engine, state.total_value),
+            "ledger": {"source": engine.ledger_source, "path": engine.ledger_path,
+                       "lots": {s: engine.tax.lot_quantity(s) for s in sorted(engine.tax.gains.lots)}
+                       if engine.tax.gains else {}},
             "rebalance_cost": None if tax_cost is None else {
                 "transaction_tax": tax_cost.transaction_tax, "capital_gains_tax": tax_cost.capital_gains_tax,
                 "total": tax_cost.total},
