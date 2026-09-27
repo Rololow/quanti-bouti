@@ -58,6 +58,7 @@ class FeedConfig:
     seed: int | None = None
     tick_seconds: float = 1.0
     annual_vol: float = 0.20
+    sim_speed: float = 0.0             # 0 = max ; 1 = temps réel ; 60 = 60× plus vite
     replay_path: str | None = None
     alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
 
@@ -301,6 +302,7 @@ class Config:
                 seed=feed.get("seed"),
                 tick_seconds=float(feed.get("tick_seconds", 1.0)),
                 annual_vol=float(feed.get("annual_vol", 0.20)),
+                sim_speed=float(feed.get("sim_speed", 0.0)),
                 replay_path=feed.get("replay_path"),
                 alpaca=AlpacaConfig(**(feed.get("alpaca") or {})),
             ),

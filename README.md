@@ -14,6 +14,12 @@ pip install -e ".[dev]"
 # Lance la boucle Core sur un flux simulé (config/config.yaml)
 python -m trading_engine.main
 
+# Dashboard (lecture seule, http://127.0.0.1:8050) ; sim_speed > 0 pour le voir évoluer
+python -m trading_engine.main --dashboard --keep-open
+
+# Dashboard autonome d'une simulation ou d'un replay (un seul fichier HTML)
+python -m trading_engine.main --quiet --export-dashboard dashboard.html
+
 # Tests
 pytest
 ```
@@ -37,7 +43,8 @@ rebalancement partiel, hystérésis, raisons, alertes, journal des décisions),
 Phase 13 (exécution : coûts et impact, fill model, pricer, optimiseur
 d'ordres, paper broker, boucle de feedback et confiance d'exécution), Phase 10
 (fondamentaux point-in-time, earnings, guidance, SEC EDGAR, news Alpaca
-dédupliquées en événements) et profils fiscaux par pays (TOML, Belgique
+dédupliquées en événements), Phase 14 (dashboard temps réel en lecture seule
+et export HTML autonome) et profils fiscaux par pays (TOML, Belgique
 fournie).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
@@ -1593,6 +1600,24 @@ Confidence
 
 ---
 
+### Implémentation (`api/`, `dashboard/`)
+
+- `api/state.py` construit l'état complet en JSON (portefeuille, positions,
+  signaux, régimes, modèles, risque, corrélations, allocation et attribution,
+  décision et historique, exécution, news, fondamentaux, alertes, fiscalité,
+  séries temporelles) ;
+- `api/server.py` : serveur HTTP sans dépendance dans la boucle asyncio du
+  moteur. Routes `GET /`, `/api/state`, `/api/history`, `/api/decisions`,
+  `/healthz`. **Lecture seule** (aucun reset, aucun ordre) ; écoute sur
+  127.0.0.1 par défaut, sans authentification ;
+- `dashboard/index.html` : une page, sans framework, rafraîchie toutes les
+  2 s ; thème clair / sombre ; couleurs validées pour le daltonisme ; les
+  textes venant des données (titres de news…) ne sont jamais interprétés en
+  HTML ;
+- `--export-dashboard` écrit un fichier HTML autonome avec l'état embarqué.
+
+---
+
 # 37. Architecture logicielle
 
 ```text
@@ -2629,14 +2654,15 @@ Le moteur :
 ## Phase 14 — Dashboard
 
 ```text
-[ ] Portfolio overview
-[ ] Position monitor
-[ ] Signal monitor
-[ ] Regime monitor
-[ ] Risk monitor
-[ ] News/events
-[ ] Decision history
-[ ] Execution monitor
+[x] Portfolio overview
+[x] Position monitor
+[x] Signal monitor
+[x] Regime monitor
+[x] Risk monitor
+[x] News/events
+[x] Decision history
+[x] Execution monitor
+[x] Export statique (analyse d'une simulation / d'un replay)
 ```
 
 ---

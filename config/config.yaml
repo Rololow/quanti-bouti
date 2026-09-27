@@ -17,6 +17,7 @@ feed:
   # Intervalle entre deux trades simulés (secondes de temps de marché).
   tick_seconds: 5.0
   annual_vol: 0.20        # volatilité annualisée simulée (convention 252 × 6h30)
+  sim_speed: 0            # 0 = aussi vite que possible ; 600 = 600× le temps réel (dashboard)
   alpaca:
     # "iex" (plan gratuit) ou "sip" (plan payant). url permet de forcer un
     # autre endpoint, ex. wss://stream.data.alpaca.markets/v2/test.

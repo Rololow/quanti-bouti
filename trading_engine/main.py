@@ -7,6 +7,7 @@ import asyncio
 import logging
 
 from trading_engine.config import DEFAULT_CONFIG_PATH, load_config
+from trading_engine.api.server import DashboardServer, export_static
 from trading_engine.engine import Engine
 from trading_engine.portfolio.portfolio import PortfolioState
 
@@ -215,10 +216,12 @@ def print_feed_status(engine: Engine) -> None:
           f"messages={status.messages_received} latency={latency} last_error={status.last_error}")
 
 
-async def _run(config_path: str) -> None:
+async def _run(args: argparse.Namespace) -> None:
     engine: Engine
 
     def report(state: PortfolioState) -> None:
+        if args.quiet:
+            return
         print_state(state)
         print_features(engine)
         print_qualitative(engine)
@@ -232,26 +235,54 @@ async def _run(config_path: str) -> None:
         print_allocation(engine)
         print_feed_status(engine)
 
-    engine = Engine(load_config(config_path), reporter=report)
+    engine = Engine(load_config(args.config), reporter=report)
     if engine.tax is not None:
         for warning in engine.tax.warnings():
             print(f"[tax] ⚠ {warning}")
+
+    server = None
+    if args.dashboard is not None:
+        server = DashboardServer(engine, host=args.dashboard_host, port=args.dashboard)
+        await server.start()
+        print(f"[dashboard] http://{server.host}:{server.port}  (lecture seule)")
     try:
         final = await engine.run()
     finally:
         print(f"\nevents={engine.bus.published_count} bars={len(engine.bars)} "
               f"handler_errors={engine.bus.error_count}")
     print("\n=== final ===")
+    args.quiet = False
     report(final)
+    if args.export_dashboard:
+        export_static(engine, args.export_dashboard)
+        print(f"[dashboard] export statique : {args.export_dashboard}")
+    if server is not None:
+        if args.keep_open:
+            print("[dashboard] flux terminé ; le dashboard reste ouvert (Ctrl+C pour quitter)")
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await server.stop()
+        else:
+            await server.stop()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
+    parser.add_argument("--dashboard", type=int, nargs="?", const=8050, default=None, metavar="PORT",
+                        help="sert le dashboard (lecture seule) sur ce port (défaut 8050)")
+    parser.add_argument("--dashboard-host", default="127.0.0.1",
+                        help="adresse d'écoute (défaut 127.0.0.1 ; pas d'authentification)")
+    parser.add_argument("--keep-open", action="store_true",
+                        help="garde le dashboard ouvert après la fin du flux")
+    parser.add_argument("--export-dashboard", metavar="FICHIER.html",
+                        help="écrit un dashboard autonome (état final embarqué)")
+    parser.add_argument("--quiet", action="store_true", help="pas de rapport console intermédiaire")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
-        asyncio.run(_run(args.config))
+        asyncio.run(_run(args))
     except KeyboardInterrupt:
         pass
 

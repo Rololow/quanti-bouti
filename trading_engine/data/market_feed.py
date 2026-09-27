@@ -38,7 +38,10 @@ class SimulatedMarketFeed(MarketFeed):
         max_events: int | None = None,
         quote_probability: float = 0.3,
         realtime: bool = False,
+        speed: float = 0.0,
     ) -> None:
+        """`speed` : 0 = aussi vite que possible ; 1 = temps réel ; 60 = 60× plus vite.
+        (`realtime=True` équivaut à speed=1.)"""
         if not initial_prices:
             raise ValueError("at least one symbol is required")
         self.prices = dict(initial_prices)
@@ -47,7 +50,7 @@ class SimulatedMarketFeed(MarketFeed):
         self.step = timedelta(seconds=tick_seconds)
         self.max_events = max_events
         self.quote_probability = quote_probability
-        self.realtime = realtime
+        self.speed = 1.0 if realtime and not speed else speed
         # Volatilité par tick, avec la même convention que le moteur
         # (252 séances de 6h30 par an) : la volatilité annualisée mesurée par le
         # moteur retrouve `annual_vol`, même si l'horloge simulée tourne en continu.
@@ -87,7 +90,7 @@ class SimulatedMarketFeed(MarketFeed):
                 )
             yield event
             n += 1
-            if self.realtime:
-                await asyncio.sleep(self.step.total_seconds())
+            if self.speed > 0:
+                await asyncio.sleep(self.step.total_seconds() / self.speed)
             else:
                 await asyncio.sleep(0)

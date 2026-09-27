@@ -148,6 +148,8 @@ class Engine:
         self.decisions: deque[Decision] = deque(maxlen=500)
         self.alert_engine = AlertEngine(config.alerts)
         self.alerts: deque[Alert] = deque(maxlen=500)
+        # Série temporelle par intervalle (dashboard : courbes de valeur, drawdown…).
+        self.history: deque[dict] = deque(maxlen=2000)
         self.decision_log = (
             DecisionLogWriter(config.storage.decision_log) if config.storage.decision_log else None
         )
@@ -271,6 +273,7 @@ class Engine:
             seed=feed_cfg.seed,
             tick_seconds=feed_cfg.tick_seconds,
             annual_vol=feed_cfg.annual_vol,
+            speed=feed_cfg.sim_speed,
             max_events=self.config.engine.max_events,
         )
         end = None
@@ -348,6 +351,23 @@ class Engine:
             if decision.action == "UREBALANCE" and self.config.execution.mode != "off":
                 self.execute(self.plan_execution(decision, status))
         await self._publish_alerts(status, decision)
+        self._record_history(status, decision)
+
+    def _record_history(self, status: SafetyStatus, decision: Decision | None) -> None:
+        state = self._raw_snapshot()
+        report = self.risk_report
+        self.history.append({
+            "timestamp": state.timestamp,
+            "value": state.total_value,
+            "cash": state.cash,
+            "drawdown": 0.0 if report is None else report.drawdown,
+            "portfolio_vol": None if report is None else report.portfolio_vol,
+            "leverage": state.leverage,
+            "safety": status.state.value,
+            "action": None if decision is None else decision.action,
+            "weights": {p.symbol: p.weight for p in state.positions},
+            "targets": dict(self.portfolio.target_weights),
+        })
 
     def _daily_vols(self, symbols: list[str]) -> dict[str, float]:
         cov = self.risk.covariance(symbols)
