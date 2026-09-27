@@ -55,3 +55,15 @@ def format_timeframe(delta: timedelta) -> str:
         if seconds % size == 0:
             return f"{seconds // size}{unit}"
     return f"{seconds}s"
+
+
+TRADING_DAYS_PER_YEAR = 252
+TRADING_HOURS_PER_DAY = 6.5
+
+
+def periods_per_year(timeframe: str) -> float:
+    """Nombre de barres par an (séance actions de 6h30 pour l'intraday)."""
+    step = parse_timeframe(timeframe)
+    if step >= timedelta(days=1):
+        return TRADING_DAYS_PER_YEAR / (step / timedelta(days=1))
+    return TRADING_DAYS_PER_YEAR * timedelta(hours=TRADING_HOURS_PER_DAY) / step

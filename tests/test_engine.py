@@ -71,3 +71,39 @@ def test_models_can_be_disabled():
     asyncio.run(engine.run())
     assert engine.models.factor_model is None
     assert all(not engine.models.regimes(s) for s in engine.features.symbols())
+
+
+def test_risk_breaches_are_published_once():
+    import dataclasses
+
+    from trading_engine.data.events import EventType
+
+    cfg = load_config()
+    limits = dataclasses.replace(cfg.risk.limits, max_drift=0.01)  # dépassé dès le départ
+    cfg = dataclasses.replace(
+        cfg, risk=dataclasses.replace(cfg.risk, limits=limits),
+        engine=dataclasses.replace(cfg.engine, max_events=8000, report_every=0),
+    )
+    engine = Engine(cfg)
+    risk_events = []
+    engine.bus.subscribe(EventType.RISK, risk_events.append)
+    asyncio.run(engine.run())
+
+    assert engine.risk_report is not None
+    assert risk_events, "au moins un dépassement de drift attendu"
+    first = risk_events[0].payload["new"]
+    assert any(key.startswith("DRIFT:") for key in first)
+
+    # Un dépassement persistant n'est publié qu'une fois ; il l'est de nouveau
+    # s'il disparaît puis réapparaît.
+    report = engine.risk_report
+    breach = next(b for b in report.breaches if b.kind == "DRIFT")
+    engine._active_breaches = frozenset()
+    risk_events.clear()
+    persistent = dataclasses.replace(report, breaches=(breach,))
+    asyncio.run(engine._publish_breaches(persistent))
+    asyncio.run(engine._publish_breaches(persistent))
+    assert len(risk_events) == 1
+    asyncio.run(engine._publish_breaches(dataclasses.replace(report, breaches=())))
+    asyncio.run(engine._publish_breaches(persistent))
+    assert len(risk_events) == 2

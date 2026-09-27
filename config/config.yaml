@@ -41,11 +41,27 @@ features:
   correlation_timeframes: [5m, 1h, 1d]
 
 allocation:
-  # Interrupteur d'ablation : "static" (portfolio.target_weights) ou
-  # "baseline" (momentum + volatility targeting, la référence à battre).
+  # Interrupteur d'ablation :
+  #   static      : portfolio.target_weights
+  #   baseline    : momentum + volatility targeting (la référence à battre)
+  #   risk_parity : contributions au risque égales
+  #   hrp         : hierarchical risk parity
+  #   signal      : budgets de risque issus des signaux (pondérés par le skill
+  #                 du modèle) + risk parity
   method: static
-  # Recalcul de la cible à chaque clôture de barre de ce timeframe.
+  # Recalcul de la cible (et du rapport de risque) à chaque barre de ce timeframe.
   rebalance_timeframe: 1h
+  target_vol: 0.10       # volatilité annualisée visée
+  min_skill: 0.0         # skill minimum d'un modèle pour influencer la cible
+  constraints:
+    max_weight: 0.40
+    min_weight: 0.0      # 0 = long-only
+    max_gross: 1.0
+    min_cash: 0.02
+    max_portfolio_vol: 0.15
+    max_turnover: 0.50   # par rebalancement (somme des |variations de poids|)
+    sectors: {SPY: equity, QQQ: equity, TLT: bonds, GLD: commodities}
+    sector_limits: {equity: 0.60}
   baseline:
     momentum_horizon: 1h
     vol_timeframe: 1h
@@ -71,6 +87,18 @@ models:
     forgetting: 0.995      # poids lambda^age des observations passées
     ridge: 10.0            # régularisation
     min_samples: 50        # pas de signal avant N résultats observés
+
+risk:
+  timeframe: 1h          # barres utilisées pour la covariance
+  shrinkage: 0.1         # shrinkage de la covariance vers sa diagonale
+  limits:
+    max_weight: 0.40
+    max_gross_leverage: 1.0
+    max_portfolio_vol: 0.20
+    max_drawdown: 0.15
+    max_risk_contribution: 0.50
+    max_position_drawdown: 0.25
+    max_drift: 0.05
 
 storage:
   # Journal JSONL des événements bruts reçus (null = désactivé). Sert au replay.

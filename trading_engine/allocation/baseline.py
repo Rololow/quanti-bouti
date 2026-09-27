@@ -16,33 +16,11 @@ de scaling) pour pouvoir expliquer tout changement de cible.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from datetime import timedelta
-
 import numpy as np
 
+from trading_engine.allocation.types import TargetAllocation
 from trading_engine.features.feature_engine import FeatureEngine
-from trading_engine.timeutils import parse_timeframe
-
-TRADING_DAYS_PER_YEAR = 252
-TRADING_HOURS_PER_DAY = 6.5
-
-
-def periods_per_year(timeframe: str) -> float:
-    """Nombre de barres par an (séance actions de 6h30 pour l'intraday)."""
-    step = parse_timeframe(timeframe)
-    if step >= timedelta(days=1):
-        return TRADING_DAYS_PER_YEAR / (step / timedelta(days=1))
-    return TRADING_DAYS_PER_YEAR * timedelta(hours=TRADING_HOURS_PER_DAY) / step
-
-
-@dataclass(frozen=True)
-class TargetAllocation:
-    weights: dict[str, float]
-    attribution: dict[str, dict[str, float]] = field(default_factory=dict)
-    portfolio_vol: float | None = None   # volatilité annualisée ex-ante
-    vol_scale: float = 1.0
-
+from trading_engine.timeutils import periods_per_year
 
 class BaselineAllocator:
     def __init__(

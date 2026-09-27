@@ -23,13 +23,40 @@ def print_state(state: PortfolioState) -> None:
         f"uPnL={state.unrealized_pnl:+,.2f} leverage={state.leverage:.2f}"
     )
     print(f"  {'symbol':<6} {'qty':>8} {'price':>10} {'weight':>7} {'target':>7} "
-          f"{'drift':>7} {'pnl':>10} {'vol(tick)':>10}")
+          f"{'drift':>7} {'pnl':>10} {'vol':>7} {'RC':>6}")
     for p in state.positions:
         print(
             f"  {p.symbol:<6} {p.quantity:>8.2f} {p.price:>10.2f} {p.weight:>7.1%} "
             f"{p.target_weight:>7.1%} {p.drift:>+7.1%} {p.pnl:>+10.2f} "
-            f"{_fmt(p.volatility, '.6f'):>10}"
+            f"{_fmt(p.volatility, '.1%'):>7} {_fmt(p.risk_contribution, '.0%'):>6}"
         )
+
+
+def print_risk(engine: Engine) -> None:
+    report = engine.risk.evaluate(engine.portfolio.snapshot())
+    print(
+        f"  risk: vol={_fmt(report.portfolio_vol, '.1%')} drawdown={report.drawdown:.2%} "
+        f"maxDD={report.max_drawdown:.2%} eff.positions={report.effective_positions:.1f} "
+        f"eff.bets={_fmt(report.effective_bets, '.1f')} "
+        f"div.ratio={_fmt(report.diversification_ratio, '.2f')}"
+    )
+    for breach in report.breaches:
+        print(f"    ! {breach}")
+    drift = engine.drift_report()
+    print(f"  drift: max={drift.max_abs_drift:.1%} turnover_to_target={drift.turnover_to_target:.1%} "
+          f"target_change={_fmt(drift.target_change, '.1%')}")
+
+
+def print_allocation(engine: Engine) -> None:
+    alloc = engine.last_allocation
+    if alloc is None:
+        return
+    print(f"  allocation ({engine.config.allocation.method}): "
+          f"ex-ante vol={_fmt(alloc.portfolio_vol, '.1%')} "
+          f"binding={', '.join(alloc.binding) or '-'}")
+    for sym, steps in sorted(alloc.attribution.items()):
+        parts = "  ".join(f"{name} {delta:+.1%}" for name, delta in steps.items())
+        print(f"    {sym:<6} {alloc.weights.get(sym, 0.0):>6.1%} = {parts}")
 
 
 def print_features(engine: Engine) -> None:
@@ -83,6 +110,8 @@ async def _run(config_path: str) -> None:
         print_state(state)
         print_features(engine)
         print_models(engine)
+        print_risk(engine)
+        print_allocation(engine)
         print_feed_status(engine)
 
     engine = Engine(load_config(config_path), reporter=report)

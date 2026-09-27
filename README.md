@@ -24,7 +24,10 @@ VWAP, corrélations EWMA), Phase 4 (journal d'événements, replay déterministe
 baseline momentum + volatility targeting) et Phase 5 (HMM de régime HF / MT / LT,
 modèle de facteurs online émettant des signaux « rendement attendu ± incertitude »,
 avec oubli, régularisation, taille minimale d'échantillon, suivi du skill et
-détection de dérive).
+détection de dérive), Phase 6 (volatilité ex-ante, contributions au risque,
+concentration, drawdown, limites et alertes) et Phase 7 (risk parity, HRP,
+budgets de risque issus des signaux, volatility targeting, Constraint Engine,
+attribution de la cible, drift monitoring).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -46,7 +49,7 @@ feed:
   provider: replay                 # puis rejoue le journal
   replay_path: data/events.jsonl
 allocation:
-  method: baseline                 # ou static : interrupteur d'ablation
+  method: signal                   # static | baseline | risk_parity | hrp | signal
 ```
 
 Le plan Alpaca gratuit donne accès au flux `iex`. Le client gère la
@@ -2235,24 +2238,24 @@ tax constraints
 ## Phase 6 — Risk
 
 ```text
-[ ] Portfolio volatility
-[ ] Covariance
-[ ] Risk contribution
-[ ] Drawdown
-[ ] Concentration
-[ ] Limits
+[x] Portfolio volatility
+[x] Covariance
+[x] Risk contribution
+[x] Drawdown
+[x] Concentration
+[x] Limits
 ```
 
 ## Phase 7 — Allocation & Constraints
 
 ```text
-[ ] Signal → target weight
-[ ] Volatility targeting
-[ ] Risk parity
-[ ] HRP
-[ ] Constraint engine
-[ ] Target attribution
-[ ] Drift monitoring
+[x] Signal → target weight
+[x] Volatility targeting
+[x] Risk parity
+[x] HRP
+[x] Constraint engine
+[x] Target attribution
+[x] Drift monitoring
 ```
 
 ## Phase 8 — Qualitative

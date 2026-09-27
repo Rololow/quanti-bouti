@@ -64,7 +64,7 @@ def test_replay_feed_missing_file(tmp_path):
         ReplayFeed(tmp_path / "nope.jsonl")
 
 
-@pytest.mark.parametrize("method", ["static", "baseline"])
+@pytest.mark.parametrize("method", ["static", "baseline", "risk_parity", "hrp", "signal"])
 def test_live_and_replay_produce_identical_state(tmp_path, method):
     """Même moteur, source différente -> même état (README §43)."""
     log = tmp_path / "events.jsonl"
@@ -85,6 +85,7 @@ def test_live_and_replay_produce_identical_state(tmp_path, method):
         assert replay.models.regimes(sym) == live.models.regimes(sym)
         assert replay.models.signals(sym) == live.models.signals(sym)
     assert any(live.models.regimes(sym) for sym in live.features.symbols())
-    if method == "baseline":
+    assert replay.risk_report == live.risk_report
+    if method != "static":
         assert live.last_allocation is not None
         assert replay.last_allocation == live.last_allocation

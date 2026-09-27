@@ -8,6 +8,9 @@ from typing import Any, Mapping
 
 import yaml
 
+from trading_engine.allocation.constraints import Constraints
+from trading_engine.risk.limits import RiskLimits
+
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
 
 
@@ -70,17 +73,34 @@ class BaselineConfig:
     max_weight: float = 0.40
 
 
+ALLOCATION_METHODS = ("static", "baseline", "risk_parity", "hrp", "signal")
+
+
 @dataclass(frozen=True)
 class AllocationConfig:
-    # "static" : poids cibles de portfolio.target_weights ;
-    # "baseline" : momentum + volatility targeting (référence d'ablation).
+    # "static"      : poids cibles de portfolio.target_weights ;
+    # "baseline"    : momentum + volatility targeting (référence d'ablation) ;
+    # "risk_parity" / "hrp" : allocation par le risque seul ;
+    # "signal"      : budgets de risque issus des signaux + risk parity.
     method: str = "static"
     rebalance_timeframe: str = "1h"
+    target_vol: float = 0.10
+    min_skill: float = 0.0
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
+    constraints: Constraints = field(default_factory=Constraints)
 
     def __post_init__(self) -> None:
-        if self.method not in ("static", "baseline"):
-            raise ValueError(f"unknown allocation method {self.method!r}")
+        if self.method not in ALLOCATION_METHODS:
+            raise ValueError(
+                f"unknown allocation method {self.method!r}, expected one of {ALLOCATION_METHODS}"
+            )
+
+
+@dataclass(frozen=True)
+class RiskConfig:
+    timeframe: str = "1h"          # barres utilisées pour la covariance
+    shrinkage: float = 0.1         # vers la diagonale
+    limits: RiskLimits = field(default_factory=RiskLimits)
 
 
 @dataclass(frozen=True)
@@ -129,6 +149,7 @@ class Config:
     allocation: AllocationConfig = field(default_factory=AllocationConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "Config":
@@ -142,6 +163,9 @@ class Config:
         corr_tfs = feats.get("correlation_timeframes")
         alloc = dict(raw.get("allocation") or {})
         alloc_baseline = BaselineConfig(**(alloc.pop("baseline", None) or {}))
+        alloc_constraints = Constraints(**(alloc.pop("constraints", None) or {}))
+        risk = dict(raw.get("risk") or {})
+        risk_limits = RiskLimits(**(risk.pop("limits", None) or {}))
         storage = raw.get("storage") or {}
         models = raw.get("models") or {}
         factor = dict(models.get("factor") or {})
@@ -187,7 +211,10 @@ class Config:
                     sym: float(w) for sym, w in (pf.get("target_weights") or {}).items()
                 },
             ),
-            allocation=AllocationConfig(baseline=alloc_baseline, **alloc),
+            allocation=AllocationConfig(
+                baseline=alloc_baseline, constraints=alloc_constraints, **alloc
+            ),
+            risk=RiskConfig(limits=risk_limits, **risk),
             storage=StorageConfig(event_log=storage.get("event_log")),
             models=ModelsConfig(
                 regimes=RegimesConfig(**(models.get("regimes") or {})),
