@@ -92,61 +92,76 @@ Le backtesting n'est donc **pas le moteur principal** du système. Il reste un o
 Architecture principale :
 
 ```text
-                         REAL-TIME DATA
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        │                     │                     │
-        ▼                     ▼                     ▼
-   Market Data           Fundamentals             News
-        │                     │                     │
-        ▼                     ▼                     ▼
- Feature Engine        Fundamental Engine      AI / NLP
-        │                     │                     │
-        └─────────────────────┼─────────────────────┘
-                              ▼
-                       ONLINE LEARNING
-                              │
-             ┌────────────────┼────────────────┐
-             │                │                │
-             ▼                ▼                ▼
-            HMM          Volatility        Predictive
-          Regimes           Models           Models
-             │                │                │
-             └────────────────┼────────────────┘
-                              ▼
-                       SIGNAL FUSION
-                              │
-                              ▼
-                        RISK ENGINE
-                              │
-                              ▼
-                    ALLOCATION ENGINE
-                              │
-                              ▼
-                    CONSTRAINT ENGINE
-                              │
-                              ▼
-                       TARGET WEIGHTS
-                              │
-                              ▼
-                     DECISION ENGINE
-                       /           \
-                      ▼             ▼
-                UREBALANCE      UDONOTHING
-                      │
-                      ▼
-                EXECUTION ENGINE
-                      │
-              ┌───────┼────────┐
-              ▼       ▼        ▼
-           Quantity  Price   Timing
-              │       │        │
-              └───────┼────────┘
-                      ▼
-                 ORDER PROPOSAL
-                      │
-                      ▼
-             Human / Broker Execution
+                          REAL-TIME DATA
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+    Market Data            Fundamentals               News
+         └──────────────────────┼──────────────────────┘
+                                ▼
+                         DATA INTEGRITY
+                  (sanity checks, quarantaine,
+                   score de qualité par source)
+                                │
+                                ▼
+                         FEATURE ENGINE
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+    HMM REGIMES          PREDICTIVE MODELS         NLP / LLM
+  (conditionnement)    (factor, TSFM optionnel)   (événements)
+         └──────────────────────┼──────────────────────┘
+                                ▼
+                         MODEL ENSEMBLE
+                     ┌──────────┴──────────┐
+                     ▼                     ▼
+                PREDICTION            RELIABILITY
+                  μ ± σ           (skill par contexte)
+                     └──────────┬──────────┘
+                                ▼
+                          SIGNAL FUSION
+                  (corrélation des erreurs entre
+                   modèles, pas de double comptage)
+                                │
+                                ▼
+                       ROBUSTNESS ENGINE
+              (stress tests, désaccord, dégradation)
+                                │
+                                ▼
+                          RISK ENGINE
+                                │
+                                ▼
+                       ALLOCATION ENGINE
+                                │
+                                ▼
+                       CONSTRAINT ENGINE
+                                │
+                                ▼
+                    UREBALANCE / UDONOTHING
+                          │           │
+                          ▼           └──► aucune action
+                    EXECUTION ENGINE
+                          │
+                          ▼
+                     HARD CONTROLS
+            (limites indépendantes des modèles)
+                          │
+                          ▼
+                    ORDER PROPOSAL
+                          │
+                          ▼
+                Human / Broker Execution
+                          │
+                          ▼
+                  EXECUTION OBSERVED
+                ┌─────────┴─────────┐
+                ▼                   ▼
+          ALPHA LEARNING     EXECUTION LEARNING
+
+
+  SAFETY ENGINE : NORMAL / DEGRADED / HALTED
+  supervise toute la chaîne (données, modèles, risque, ordres) ;
+  en HALTED, seul UDONOTHING est possible.
 ```
 
 Ce n'est pas un bot qui cherche des occasions de `BUY` / `SELL`. C'est un
@@ -2178,7 +2193,147 @@ tax constraints
 
 ---
 
-# 50. V1 Development Roadmap
+# 50. Robustness / Adversarial Defense
+
+Objectif : **résister à la manipulation, aux données trompeuses et à
+l'exploitation du comportement du système**. Il ne s'agit pas de dissimuler
+une stratégie ni de contourner la surveillance du marché.
+
+Principe clé : **aucune source et aucun modèle ne peut, seul, provoquer un
+gros `UREBALANCE`**. La question n'est pas « la prédiction est-elle bonne ? »
+mais :
+
+> **La prédiction est-elle stable, indépendante, calibrée et économiquement utile ?**
+
+`UDONOTHING` devient alors aussi la réponse normale quand l'information est
+trop incertaine ou trop contradictoire, pas seulement quand la cible n'a pas
+bougé.
+
+## 50.1 Data Integrity
+
+Avant tout modèle. Un saut $|r_t| > k\sigma$ n'est pas automatiquement un
+crash : mauvaise donnée, split, corporate action, glitch de flux, timestamp
+incorrect.
+
+```text
+timestamp dans le futur / hors ordre
+prix ou taille invalides
+saut de prix non confirmé      → quarantaine jusqu'au trade suivant
+saut confirmé à un ratio de split (2:1, 3:1, 1:2…) → corporate action probable
+quote croisée (bid > ask), spread anormal
+barre incohérente (high < low, close hors range)
+flux figé (plus de données alors que le marché vit)
+```
+
+Un saut isolé est mis en **quarantaine** : confirmé par le trade suivant, il
+est accepté ; démenti (retour à l'ancien niveau), il est rejeté comme glitch.
+Chaque symbole et chaque source a un `DataIntegrityScore`.
+
+## 50.2 Safety Engine et hard controls
+
+```text
+NORMAL     tout est cohérent
+DEGRADED   désaccord des modèles, qualité des données ↓, modèle dégradé,
+           corporate action → rebalancements réduits, symboles concernés gelés
+HALTED     flux corrompu, explosion numérique, perte journalière max,
+           rejets répétés des hard controls → uniquement UDONOTHING
+```
+
+- l'escalade est immédiate, le retour de DEGRADED à NORMAL demande plusieurs
+  évaluations saines consécutives ;
+- **HALTED exige une remise en route manuelle** ;
+- **HALTED ne signifie pas liquider** : on arrête de décider, on ne vend pas
+  dans la panique.
+
+Les **hard controls** sont distincts du Constraint Engine : le Constraint
+Engine façonne la cible ; les hard controls sont un **veto final** sur les
+cibles et les ordres, avec leurs propres limites que les modèles ne peuvent
+pas modifier (poids maximal, exposition, taille d'ordre, participation, collar
+de prix, nombre d'opérations par jour, turnover journalier). C'est la même
+logique que les contrôles pré-trade d'accès au marché : bloquer les ordres
+erronés ou hors limites, même si un modèle produit `target = 0.99`.
+
+## 50.3 Model ensemble : accord ≠ indépendance
+
+L'accord entre modèles n'a de valeur que si leurs **erreurs** sont
+indépendantes. HMM, TSFM et momentum lisent la même série de prix : leur
+accord est gonflé par construction. La fusion utilise donc la **corrélation
+des erreurs** mesurée hors échantillon (deux modèles corrélés à 0.9 valent
+à peu près un seul modèle).
+
+Le désaccord entre **horizons** reste une information, pas forcément un
+défaut. Le HMM ne vote pas : il estime des régimes de volatilité et sert à
+**conditionner** les autres modèles. Un TSFM n'est ajouté que s'il bat la
+baseline en replay (§49.2).
+
+## 50.4 Modèle dégradé
+
+Quand les données deviennent incompatibles avec le modèle
+($P(data \mid model) \ll$ niveau habituel), le système déclenche
+`MODEL_DEGRADED` au lieu d'augmenter sa confiance : dérive de l'erreur
+(Page-Hinkley) pour les modèles prédictifs, chute durable de la
+log-vraisemblance pour les HMM.
+
+## 50.5 Prédictibilité ≠ fiabilité
+
+- **prédiction** : $\mu \pm \sigma$ ;
+- **fiabilité** : le modèle a-t-il été fiable récemment, **dans ce contexte** ?
+
+La fiabilité est d'abord le skill hors échantillon par régime, niveau de
+volatilité et horizon, ramené vers le skill global tant que les données sont
+rares (un méta-modèle complet demande beaucoup de résultats observés).
+
+## 50.6 Stress tests et perturbations
+
+- **online**, au moment d'un rebalancement : recalculer la cible sous
+  plusieurs scénarios (vol ×2, corrélations ↑, rendement −2σ, spread ×3) ; une
+  cible qui s'effondre sous des hypothèses proches n'est pas robuste ;
+- **offline**, dans les tests et le replay : de petites perturbations
+  $\delta$ des données ne doivent pas changer la décision,
+  $\|\Delta S\| \ll \|\delta\|$.
+
+## 50.7 News
+
+Articles quasi identiques → **un seul événement** (clustering), et
+
+$$
+Signal_{news} = Impact \times Confidence \times Novelty \times SourceQuality
+$$
+
+(source primaire ≠ quinze reprises d'une même rumeur).
+
+## 50.8 Décision : unités économiques, pas soupe de scores
+
+La décision garde tous les diagnostics pour l'explication :
+
+```python
+Decision(
+    action="UREBALANCE",
+    target_weight=0.15,
+    expected_return=0.024, uncertainty=0.011,
+    model_agreement=0.82, model_reliability=0.76,
+    data_quality=0.97, source_quality=0.91,
+    robustness_score=0.88, portfolio_risk=0.12,
+    execution_confidence=0.74,
+)
+```
+
+mais **ne multiplie pas** ces scores entre eux (ils ne sont pas calibrés sur
+la même échelle et leur produit tend vers zéro arbitrairement). Chacun agit
+en unités économiques :
+
+- **filtres** : qualité des données, état de sécurité, instabilité aux stress
+  tests → `UDONOTHING` ;
+- **incertitude** : désaccord et faible fiabilité **élargissent** $\sigma$ ;
+- **règle** :
+
+$$
+UREBALANCE \iff Benefit - Cost_{execution} > k \cdot \sigma_{effective}
+$$
+
+---
+
+# 51. V1 Development Roadmap
 
 ## Phase 1 — Core
 
@@ -2258,7 +2413,30 @@ tax constraints
 [x] Drift monitoring
 ```
 
-## Phase 8 — Qualitative
+## Phase 8 — Data Integrity & Safety
+
+```text
+[ ] Sanity checks (timestamps, prix, quotes, barres)
+[ ] Quarantaine des sauts non confirmés
+[ ] Détection de corporate actions probables
+[ ] Flux figé
+[ ] DataIntegrityScore par symbole
+[ ] Safety Engine (NORMAL / DEGRADED / HALTED)
+[ ] Perte journalière maximale
+[ ] Hard controls (cibles et ordres)
+```
+
+## Phase 9 — Robustness
+
+```text
+[ ] MODEL_DEGRADED (vraisemblance HMM)
+[ ] Fiabilité par contexte (régime, volatilité, horizon)
+[ ] Corrélation des erreurs entre modèles
+[ ] Stress tests de la cible
+[ ] Tests de perturbation (suite de tests / replay)
+```
+
+## Phase 10 — Qualitative
 
 ```text
 [ ] Fundamental data
@@ -2268,7 +2446,7 @@ tax constraints
 [ ] News feed
 ```
 
-## Phase 9 — AI
+## Phase 11 — AI
 
 ```text
 [ ] Structured output schema
@@ -2280,21 +2458,23 @@ tax constraints
 [ ] Fundamental extraction
 [ ] Validation pipeline (schema, range, source)
 [ ] Event deduplication / clustering
+[ ] Source quality / diversity
 ```
 
-## Phase 10 — Decision Engine
+## Phase 12 — Decision Engine
 
 ```text
 [ ] Signal fusion (sans double comptage)
 [ ] Risk checks
 [ ] Hystérésis
-[ ] U_rebalance vs U_donothing (alpha net)
+[ ] U_rebalance vs U_donothing (alpha net, k · σ effectif)
+[ ] Filtres : data quality, safety state, stress tests
 [ ] Partial rebalance (execution weight, urgency)
 [ ] Reason generation
 [ ] Alerts
 ```
 
-## Phase 11 — Execution
+## Phase 13 — Execution
 
 ```text
 [ ] Cost model (spread, slippage, fees)
@@ -2307,7 +2487,7 @@ tax constraints
 [ ] Execution feedback loop
 ```
 
-## Phase 12 — Dashboard
+## Phase 14 — Dashboard
 
 ```text
 [ ] Portfolio overview
@@ -2322,79 +2502,84 @@ tax constraints
 
 ---
 
-# 51. Final target architecture
+# 52. Final target architecture
 
 ```text
-                           ┌───────────────────────┐
-                           │       ALPACA          │
-                           │                       │
-                           │ Market │ News │ Data │
-                           └───────────┬───────────┘
-                                       │
-                                       ▼
-                              ┌────────────────┐
-                              │    EVENT BUS   │
-                              └───────┬────────┘
-                                      │
-             ┌────────────────────────┼────────────────────────┐
-             │                        │                        │
-             ▼                        ▼                        ▼
-       MARKET ENGINE            FUNDAMENTAL               NEWS ENGINE
-             │                    ENGINE                       │
-             │                        │                        ▼
-             │                        │                  Structured AI
-             │                        │                        │
-             └──────────────┬─────────┴────────────────────────┘
-                            │
-                            ▼
-                     FEATURE ENGINE
-                            │
-            ┌───────────────┼────────────────┐
-            ▼               ▼                ▼
-          HMM-HF          HMM-MT           HMM-LT
-            │               │                │
-            └───────────────┼────────────────┘
-                            ▼
-                    ONLINE MODELS
-                            │
-                            ▼
-                      SIGNAL FUSION
-                            │
-                            ▼
-                     PORTFOLIO ENGINE
-                            │
-                            ▼
-                       RISK ENGINE
-                            │
-                            ▼
-                    ALLOCATION ENGINE
-                            │
-                            ▼
-                    CONSTRAINT ENGINE
-                            │
-                            ▼
-                    DECISION ENGINE
-                            │
-                  ┌─────────┴─────────┐
-                  ▼                   ▼
-             UREBALANCE          UDONOTHING
-                  │
-                  ▼
-           EXECUTION ENGINE
-                  │
-                  ▼
-            ORDER PROPOSAL ──────► DASHBOARD / ALERTS
-                  │
-                  ▼
-       HUMAN / BROKER EXECUTION
-                  │
-                  ▼
-           OBSERVE RESULT ───────► ONLINE LEARNING
+                          REAL-TIME DATA
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+    Market Data            Fundamentals               News
+         └──────────────────────┼──────────────────────┘
+                                ▼
+                         DATA INTEGRITY
+                  (sanity checks, quarantaine,
+                   score de qualité par source)
+                                │
+                                ▼
+                         FEATURE ENGINE
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+    HMM REGIMES          PREDICTIVE MODELS         NLP / LLM
+  (conditionnement)    (factor, TSFM optionnel)   (événements)
+         └──────────────────────┼──────────────────────┘
+                                ▼
+                         MODEL ENSEMBLE
+                     ┌──────────┴──────────┐
+                     ▼                     ▼
+                PREDICTION            RELIABILITY
+                  μ ± σ           (skill par contexte)
+                     └──────────┬──────────┘
+                                ▼
+                          SIGNAL FUSION
+                  (corrélation des erreurs entre
+                   modèles, pas de double comptage)
+                                │
+                                ▼
+                       ROBUSTNESS ENGINE
+              (stress tests, désaccord, dégradation)
+                                │
+                                ▼
+                          RISK ENGINE
+                                │
+                                ▼
+                       ALLOCATION ENGINE
+                                │
+                                ▼
+                       CONSTRAINT ENGINE
+                                │
+                                ▼
+                    UREBALANCE / UDONOTHING
+                          │           │
+                          ▼           └──► aucune action
+                    EXECUTION ENGINE
+                          │
+                          ▼
+                     HARD CONTROLS
+            (limites indépendantes des modèles)
+                          │
+                          ▼
+                    ORDER PROPOSAL
+                          │
+                          ▼
+                Human / Broker Execution
+                          │
+                          ▼
+                  EXECUTION OBSERVED
+                ┌─────────┴─────────┐
+                ▼                   ▼
+          ALPHA LEARNING     EXECUTION LEARNING
+
+
+  SAFETY ENGINE : NORMAL / DEGRADED / HALTED
+  supervise toute la chaîne (données, modèles, risque, ordres) ;
+  en HALTED, seul UDONOTHING est possible.
 ```
 
 ---
 
-# 52. Design principles
+# 53. Design principles
 
 Le projet doit respecter les principes suivants :
 
@@ -2419,10 +2604,14 @@ Le projet doit respecter les principes suivants :
 19. **Live and replay run the exact same engine**
 20. **Signals are expected returns with uncertainty, compared to costs**
 21. **Every module must prove its incremental value against a simple baseline**
+22. **No single source or model can trigger a large rebalance on its own**
+23. **Model agreement only counts if model errors are independent**
+24. **Hard controls are independent of models and cannot be changed by them**
+25. **When in doubt, UDONOTHING: uncertainty is a reason not to act**
 
 ---
 
-# 53. First implementation milestone
+# 54. First implementation milestone
 
 La première milestone concrète est volontairement petite :
 
