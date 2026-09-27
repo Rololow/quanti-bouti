@@ -17,6 +17,7 @@ from trading_engine.data.market_feed import MarketFeed, SimulatedMarketFeed
 from trading_engine.data.market_state import MarketStateStore
 from trading_engine.data.replay_feed import ReplayFeed
 from trading_engine.features.feature_engine import TICK, FeatureEngine
+from trading_engine.models.model_engine import ModelEngine
 from trading_engine.portfolio.portfolio import Portfolio, PortfolioState
 from trading_engine.portfolio.positions import Position
 from trading_engine.storage.event_log import EventLogWriter
@@ -41,6 +42,7 @@ class Engine:
             correlation_timeframes=config.features.correlation_timeframes,
             lam=config.ewma_lambda,
         )
+        self.models = ModelEngine(config.models, self.features)
         self.portfolio = Portfolio(
             cash=config.portfolio.cash,
             positions={
@@ -119,6 +121,7 @@ class Engine:
         self.bars.append(event)
         self.market_state.update(event)
         self.features.on_bar(event)
+        self.models.on_bar(event)
         if self.allocator is not None and event.timeframe == self.config.allocation.rebalance_timeframe:
             self._allocation_due = True
 

@@ -52,3 +52,22 @@ def test_bars_close_on_market_clock_for_idle_symbols(t0):
 
     closed_5m = {(b.symbol, b.timeframe) for b in engine.bars}
     assert ("TLT", "5m") in closed_5m  # TLT n'a plus tradé mais sa barre est close
+
+
+def test_models_can_be_disabled():
+    import dataclasses
+
+    cfg = load_config()
+    models = dataclasses.replace(
+        cfg.models,
+        regimes=dataclasses.replace(cfg.models.regimes, enabled=False),
+        factor=dataclasses.replace(cfg.models.factor, enabled=False),
+    )
+    cfg = dataclasses.replace(
+        cfg, models=models,
+        engine=dataclasses.replace(cfg.engine, max_events=3000, report_every=0),
+    )
+    engine = Engine(cfg)
+    asyncio.run(engine.run())
+    assert engine.models.factor_model is None
+    assert all(not engine.models.regimes(s) for s in engine.features.symbols())

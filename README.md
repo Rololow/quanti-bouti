@@ -20,8 +20,11 @@ pytest
 
 État actuel : Phase 1 (Core), Phase 2 (Realtime), Phase 3 (Features :
 rendements, volatilité EWMA, momentum multi-horizon normalisé, mean reversion,
-VWAP, corrélations EWMA) et Phase 4 (journal d'événements, replay déterministe,
-baseline momentum + volatility targeting).
+VWAP, corrélations EWMA), Phase 4 (journal d'événements, replay déterministe,
+baseline momentum + volatility targeting) et Phase 5 (HMM de régime HF / MT / LT,
+modèle de facteurs online émettant des signaux « rendement attendu ± incertitude »,
+avec oubli, régularisation, taille minimale d'échantillon, suivi du skill et
+détection de dérive).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -2220,13 +2223,13 @@ tax constraints
 ## Phase 5 — Online Models
 
 ```text
-[ ] Signal = rendement attendu ± incertitude
-[ ] HMM-HF
-[ ] HMM-MT
-[ ] HMM-LT
-[ ] Online factor model
-[ ] Forgetting / regularization / minimum sample size
-[ ] Stability & drift monitoring
+[x] Signal = rendement attendu ± incertitude
+[x] HMM-HF
+[x] HMM-MT
+[x] HMM-LT
+[x] Online factor model
+[x] Forgetting / regularization / minimum sample size
+[x] Stability & drift monitoring
 ```
 
 ## Phase 6 — Risk

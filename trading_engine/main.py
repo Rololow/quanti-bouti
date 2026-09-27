@@ -49,6 +49,24 @@ def print_features(engine: Engine) -> None:
         print(f"  corr {tf}: " + "  ".join(pairs))
 
 
+def print_models(engine: Engine) -> None:
+    for sym in engine.features.symbols():
+        regimes = engine.models.regimes(sym)
+        parts = [f"{h} {st.most_likely} {st.confidence:.0%}" for h, st in sorted(regimes.items())]
+        sigs = [
+            f"{sg.horizon} {sg.mean * 1e4:+.1f}bp ±{sg.std * 1e4:.1f}bp (P>0 {sg.prob_positive:.0%})"
+            for sg in engine.models.signals(sym)
+        ]
+        print(f"  {sym:<6} regime: {' | '.join(parts) or '-':<48} signal: {', '.join(sigs) or '-'}")
+    fm = engine.models.factor_model
+    if fm is not None:
+        mon = fm.monitor
+        skill = "-" if mon.skill is None else f"{mon.skill:+.3f}"
+        coverage = "-" if mon.coverage is None else f"{mon.coverage:.0%}"
+        print(f"  factor model: samples={fm.regression.n_updates} skill={skill} "
+              f"coverage(±1σ)={coverage} drifts={mon.drift_count}")
+
+
 def print_feed_status(engine: Engine) -> None:
     status = getattr(engine.feed, "status", None)
     if status is None:
@@ -64,6 +82,7 @@ async def _run(config_path: str) -> None:
     def report(state: PortfolioState) -> None:
         print_state(state)
         print_features(engine)
+        print_models(engine)
         print_feed_status(engine)
 
     engine = Engine(load_config(config_path), reporter=report)

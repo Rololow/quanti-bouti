@@ -44,3 +44,14 @@ def parse_rfc3339(value: str) -> datetime:
     Les chiffres au-delà de la microseconde sont tronqués.
     """
     return ensure_utc(datetime.fromisoformat(value))
+
+
+def format_timeframe(delta: timedelta) -> str:
+    """Inverse de `parse_timeframe` : 30 minutes -> '30m', 2 jours -> '2d'."""
+    seconds = int(delta.total_seconds())
+    if seconds <= 0 or seconds != delta.total_seconds():
+        raise ValueError(f"unsupported timeframe: {delta!r}")
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"

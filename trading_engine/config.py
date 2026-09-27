@@ -84,6 +84,36 @@ class AllocationConfig:
 
 
 @dataclass(frozen=True)
+class RegimesConfig:
+    enabled: bool = True
+    n_states: int = 3
+    # HMM-HF / HMM-MT / HMM-LT -> timeframe de barre
+    timeframes: Mapping[str, str] = field(
+        default_factory=lambda: {"HF": "5m", "MT": "1h", "LT": "1d"}
+    )
+    min_samples: int = 100
+    window: int = 500
+    refit_every: int = 50
+
+
+@dataclass(frozen=True)
+class FactorConfig:
+    enabled: bool = True
+    timeframe: str = "5m"
+    horizon_bars: int = 6
+    features: tuple[str, ...] = ("mom_30m", "mom_1h", "z_5m", "reversal_5m", "vwap_dist")
+    forgetting: float = 0.995
+    ridge: float = 10.0
+    min_samples: int = 50
+
+
+@dataclass(frozen=True)
+class ModelsConfig:
+    regimes: RegimesConfig = field(default_factory=RegimesConfig)
+    factor: FactorConfig = field(default_factory=FactorConfig)
+
+
+@dataclass(frozen=True)
 class StorageConfig:
     event_log: str | None = None
 
@@ -98,6 +128,7 @@ class Config:
     portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
     allocation: AllocationConfig = field(default_factory=AllocationConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    models: ModelsConfig = field(default_factory=ModelsConfig)
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "Config":
@@ -112,6 +143,10 @@ class Config:
         alloc = dict(raw.get("allocation") or {})
         alloc_baseline = BaselineConfig(**(alloc.pop("baseline", None) or {}))
         storage = raw.get("storage") or {}
+        models = raw.get("models") or {}
+        factor = dict(models.get("factor") or {})
+        if "features" in factor:
+            factor["features"] = tuple(factor["features"])
 
         ewma_lambda = float(vol.get("lambda", 0.94))
         if not 0.0 < ewma_lambda < 1.0:
@@ -154,6 +189,10 @@ class Config:
             ),
             allocation=AllocationConfig(baseline=alloc_baseline, **alloc),
             storage=StorageConfig(event_log=storage.get("event_log")),
+            models=ModelsConfig(
+                regimes=RegimesConfig(**(models.get("regimes") or {})),
+                factor=FactorConfig(**factor),
+            ),
         )
 
 

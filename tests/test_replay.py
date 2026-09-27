@@ -81,6 +81,10 @@ def test_live_and_replay_produce_identical_state(tmp_path, method):
     for sym in live.features.symbols():
         assert replay.features.snapshot(sym) == live.features.snapshot(sym)
     assert [b.close for b in replay.bars] == [b.close for b in live.bars]
+    for sym in live.features.symbols():
+        assert replay.models.regimes(sym) == live.models.regimes(sym)
+        assert replay.models.signals(sym) == live.models.signals(sym)
+    assert any(live.models.regimes(sym) for sym in live.features.symbols())
     if method == "baseline":
         assert live.last_allocation is not None
         assert replay.last_allocation == live.last_allocation
