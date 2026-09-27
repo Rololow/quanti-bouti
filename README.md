@@ -72,44 +72,63 @@ Architecture principale :
 
 ```text
                          REAL-TIME DATA
-                               │
-             ┌─────────────────┼─────────────────┐
-             │                 │                 │
-             ▼                 ▼                 ▼
-        Market Data       Fundamentals         News
-             │                 │                 │
-             ▼                 ▼                 ▼
-       Feature Engine    Fundamental Engine   AI/NLP Engine
-             │                 │                 │
-             └─────────────────┼─────────────────┘
-                               ▼
-                      ONLINE LEARNING
-                               │
-             ┌─────────────────┼─────────────────┐
-             ▼                 ▼                 ▼
-           HMM             Volatility        Predictive
-         Regimes             Models            Models
-             │                 │                 │
-             └─────────────────┼─────────────────┘
-                               ▼
-                      SIGNAL FUSION
-                               │
-                               ▼
-                       RISK ENGINE
-                               │
-                               ▼
-                     TARGET ALLOCATION
-                               │
-                               ▼
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+   Market Data           Fundamentals             News
+        │                     │                     │
+        ▼                     ▼                     ▼
+ Feature Engine        Fundamental Engine      AI / NLP
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              ▼
+                       ONLINE LEARNING
+                              │
+             ┌────────────────┼────────────────┐
+             │                │                │
+             ▼                ▼                ▼
+            HMM          Volatility        Predictive
+          Regimes           Models           Models
+             │                │                │
+             └────────────────┼────────────────┘
+                              ▼
+                       SIGNAL FUSION
+                              │
+                              ▼
+                        RISK ENGINE
+                              │
+                              ▼
+                    ALLOCATION ENGINE
+                              │
+                              ▼
+                       TARGET WEIGHTS
+                              │
+                              ▼
                      DECISION ENGINE
-                               │
-                  ┌────────────┴────────────┐
-                  ▼                         ▼
-              Dashboard                  Alerts
-                  │
-                  ▼
-              Human / Execution
+                       /           \
+                      ▼             ▼
+                UREBALANCE      UDONOTHING
+                      │
+                      ▼
+                EXECUTION ENGINE
+                      │
+              ┌───────┼────────┐
+              ▼       ▼        ▼
+           Quantity  Price   Timing
+              │       │        │
+              └───────┼────────┘
+                      ▼
+                 ORDER PROPOSAL
+                      │
+                      ▼
+             Human / Broker Execution
 ```
+
+Ce n'est pas un bot qui cherche des occasions de `BUY` / `SELL`. C'est un
+**système de contrôle adaptatif du portefeuille** : il maintient en permanence
+un état cible, mesure le coût de s'en écarter, décide s'il faut le corriger,
+puis optimise la manière de réaliser cette correction.
 
 ---
 
@@ -117,23 +136,34 @@ Architecture principale :
 
 Le système ne doit pas directement transformer un signal en ordre.
 
+Il n'y a **aucun `BUY` / `SELL` / `HOLD` au niveau décisionnel**. Les seules
+décisions possibles sont :
+
+```text
+UREBALANCE     revenir (partiellement) vers la cible
+UDONOTHING     accepter la situation actuelle malgré le drift
+```
+
 Pipeline :
 
 ```text
 SIGNAL
    ↓
-TARGET POSITION
+TARGET WEIGHT
    ↓
 RISK CHECK
    ↓
-APPROVE / REJECT
+UREBALANCE / UDONOTHING
    ↓
-TRADE PROPOSAL
+EXECUTION ENGINE      (uniquement après UREBALANCE)
    ↓
-HUMAN / EXECUTION
+ORDER PROPOSAL
+   ↓
+HUMAN / BROKER EXECUTION
 ```
 
-Un `TRADE_PROPOSAL` est une recommandation technique du moteur, pas nécessairement un ordre envoyé au broker.
+Un `ORDER_PROPOSAL` est une recommandation technique du moteur, pas
+nécessairement un ordre envoyé au broker.
 
 Cela permet de développer et valider tout le système sans risque d'exécution involontaire.
 
@@ -1114,7 +1144,7 @@ Cela peut être une information de risque à part entière.
 
 ---
 
-# 31. Decision Engine
+# 31. Decision Engine : UREBALANCE / UDONOTHING
 
 Le Decision Engine combine :
 
@@ -1130,30 +1160,229 @@ Risk
 Target weights
 ```
 
-et produit :
+Il n'y a pas :
+
+```text
+BUY
+SELL
+HOLD
+```
+
+Il n'y a que :
+
+```text
+UREBALANCE
+UDONOTHING
+```
+
+Le moteur compare deux utilités : $U_{rebalance}$ et $U_{donothing}$.
+
+### `UDONOTHING`
+
+On accepte la situation actuelle malgré le drift.
+
+Coûts potentiels :
+
+```text
+risk drift
+concentration
+higher portfolio volatility
+loss of diversification
+```
+
+### `UREBALANCE`
+
+On revient vers la cible, mais on prend en compte :
+
+```text
+transaction costs
+spread
+slippage
+market impact
+tax
+execution risk
+```
+
+Conceptuellement :
+
+$$
+U_{rebalance} = Benefit_{risk} - Cost_{execution}
+$$
+
+et :
+
+$$
+Decision =
+\begin{cases}
+UREBALANCE & \text{si bénéfice > coût} \\
+UDONOTHING & \text{sinon}
+\end{cases}
+$$
+
+---
+
+## 31.1 Rebalancement partiel
+
+`UREBALANCE` ne signifie pas forcément `10% → 15%` immédiatement.
+
+Le moteur peut décider une trajectoire :
+
+```text
+10%
+ ↓
+11.5%
+ ↓
+13%
+ ↓
+15%
+```
+
+Donc :
 
 ```python
-TradeProposal(
+Decision(
     symbol="AAPL",
-    current_weight=0.21,
-    target_weight=0.17,
-    delta=-0.04,
+    action="UREBALANCE",
+    current_weight=0.10,
+    target_weight=0.15,
+    execution_weight=0.115,
+    urgency=0.72,
 
     reason=[
         "target drift",
         "risk contribution elevated",
-        "medium-term signal weakened"
+        "medium-term signal strengthened"
     ],
-
-    confidence=0.78
 )
 ```
 
-Le proposal ne devient pas automatiquement un ordre.
+La décision ne devient pas automatiquement un ordre.
 
 ---
 
-# 32. Alerts
+# 32. Execution Engine
+
+Appelé **seulement après `UREBALANCE`**.
+
+Il reçoit :
+
+```text
+current weight
+target weight
+execution weight
+```
+
+et cherche **comment** exécuter.
+
+### Fill probability
+
+$$
+P_{fill}(p, q, \Delta t)
+$$
+
+### Execution cost
+
+$$
+C(q) = C_{spread} + C_{slippage} + C_{impact} + C_{fees}
+$$
+
+### Participation
+
+$$
+participation = \frac{Q_{order}}{V_{market}}
+$$
+
+### Signal half-life
+
+Un signal HF qui disparaît dans 20 minutes n'est pas exécuté comme un signal
+LT valable plusieurs mois : l'urgence dépend de la demi-vie du signal.
+
+---
+
+# 33. Order Optimizer
+
+Il peut optimiser :
+
+```text
+quantity
+limit price
+aggressiveness
+timing
+execution duration
+```
+
+Conceptuellement :
+
+$$
+U(o) = P_{fill}(o)\,E[\alpha(o)] - C_{execution}(o) - C_{risk}(o)
+$$
+
+puis :
+
+$$
+o^* = \arg\max_o U(o)
+$$
+
+Le système peut donc produire :
+
+```text
+UREBALANCE
+
+AAPL
+10% → 15%
+
+execute:
++1.5% now
+limit = 249.99
+urgency = 0.72
+expected fill = 72%
+```
+
+---
+
+# 34. Deux boucles d'apprentissage
+
+### Alpha loop
+
+```text
+Market
+ ↓
+Signal
+ ↓
+Prediction
+ ↓
+Realized return
+ ↓
+Model update
+```
+
+### Execution loop
+
+```text
+Order proposal
+ ↓
+Execution
+ ↓
+Fill / partial fill / no fill
+ ↓
+Realized slippage
+ ↓
+Market impact
+ ↓
+Model update
+```
+
+Le système apprend donc deux choses différentes :
+
+$$
+\boxed{\text{Quel target weight ?}}
+\qquad
+\boxed{\text{Comment atteindre ce target ?}}
+$$
+
+---
+
+# 35. Alerts
 
 Exemples :
 
@@ -1173,51 +1402,66 @@ IMPORTANT_NEWS
 
 ---
 
-# 33. Dashboard
+# 36. Dashboard
 
 Le dashboard doit permettre de voir en temps réel :
 
-### Portfolio
-
 ```text
-Total value
-PnL
-Daily PnL
+PORTFOLIO
+────────────────────────────
+
+Equity
+Cash
 Portfolio volatility
 Drawdown
 Leverage
-```
 
-### Positions
+RISK
+────────────────────────────
 
-```text
-Symbol
-Weight
-Target
-Drift
-PnL
-Volatility
-Risk contribution
-```
+AAPL       RC 23%
+MSFT       RC 18%
+SPY        RC 31%
 
-### Signals
+REGIME
+────────────────────────────
 
-```text
-HF
-ST
-MT
-LT
-```
+HF   TREND_LOW_VOL  72%
+MT   SIDEWAYS       54%
+LT   HIGH_VOL       41%
 
-### Regime
+SIGNALS
+────────────────────────────
 
-```text
-HMM state probabilities
-```
+AAPL
+HF   +0.72
+ST   +0.41
+MT   -0.18
+LT   -0.43
 
-### Qualitative
+ALLOCATION
+────────────────────────────
 
-```text
+AAPL
+Current    10%
+Target     15%
+Drift       5%
+
+DECISION
+────────────────────────────
+
+UREBALANCE
+
+EXECUTION
+────────────────────────────
+
+Expected fill    72%
+Expected impact   0.04%
+Urgency           0.71
+
+QUALITATIVE
+────────────────────────────
+
 Fundamental score
 News score
 Latest events
@@ -1226,7 +1470,7 @@ Confidence
 
 ---
 
-# 34. Architecture logicielle
+# 37. Architecture logicielle
 
 ```text
 trading_engine/
@@ -1282,7 +1526,14 @@ trading_engine/
 │   └── targeting.py
 │
 ├── decision/
-│   └── engine.py
+│   └── rebalance.py
+│
+├── execution/
+│   ├── fill_model.py
+│   ├── cost_model.py
+│   ├── impact_model.py
+│   ├── order_pricer.py
+│   └── optimizer.py
 │
 ├── storage/
 │   ├── database.py
@@ -1300,7 +1551,7 @@ trading_engine/
 
 ---
 
-# 35. Core data model
+# 38. Core data model
 
 Chaque objet important doit être immutable ou versionné autant que possible.
 
@@ -1377,9 +1628,40 @@ RiskState(
 )
 ```
 
+### Decision
+
+```python
+Decision(
+    decision_id,
+    symbol,
+    action,            # UREBALANCE | UDONOTHING
+    current_weight,
+    target_weight,
+    execution_weight,
+    urgency,
+    reason,
+    timestamp
+)
+```
+
+### Order Proposal
+
+```python
+OrderProposal(
+    decision_id,
+    symbol,
+    quantity,
+    limit_price,
+    urgency,
+    expected_fill,
+    expected_cost,
+    timestamp
+)
+```
+
 ---
 
-# 36. Asynchronous architecture
+# 39. Asynchronous architecture
 
 Le système doit être conçu autour de `asyncio`.
 
@@ -1401,7 +1683,7 @@ Chaque composant communique via l'EventBus.
 
 ---
 
-# 37. Exemple de boucle complète
+# 40. Exemple de boucle complète
 
 ```python
 async for event in feed:
@@ -1432,12 +1714,16 @@ async for event in feed:
 
         online_model.update(structured_event)
 
-    decision_engine.evaluate()
+    decision = decision_engine.evaluate()
+
+    if decision.action == "UREBALANCE":
+        proposal = execution_engine.optimize(decision)
+        await event_bus.publish(proposal)
 ```
 
 ---
 
-# 38. Storage
+# 41. Storage
 
 Même si le moteur est realtime, **tout doit être enregistré**.
 
@@ -1454,7 +1740,9 @@ AI outputs
 signals
 risk states
 target weights
-trade proposals
+decisions (UREBALANCE / UDONOTHING)
+order proposals
+fills / slippage
 ```
 
 Cela permet ensuite de répondre à :
@@ -1463,7 +1751,7 @@ Cela permet ensuite de répondre à :
 
 ---
 
-# 39. Reproductibilité
+# 42. Reproductibilité
 
 Chaque décision doit pouvoir être reconstruite à partir de :
 
@@ -1483,7 +1771,7 @@ Un `decision_id` doit idéalement relier tout cela.
 
 ---
 
-# 40. Backtesting
+# 43. Backtesting
 
 Le backtesting n'est pas le moteur principal.
 
@@ -1509,7 +1797,7 @@ Le log historique permet ensuite de reconstruire le comportement passé.
 
 ---
 
-# 41. Anti-look-ahead
+# 44. Anti-look-ahead
 
 Le système doit respecter strictement :
 
@@ -1534,7 +1822,7 @@ Même si la base de données historique contient déjà la valeur finale.
 
 ---
 
-# 42. Initialisation
+# 45. Initialisation
 
 Le système ne démarre pas totalement "from zero".
 
@@ -1557,7 +1845,7 @@ Cela concerne notamment :
 
 ---
 
-# 43. Online vs retraining
+# 46. Online vs retraining
 
 Tous les modèles ne doivent pas être entraînés à la même fréquence.
 
@@ -1577,7 +1865,7 @@ Tous les modèles ne doivent pas être entraînés à la même fréquence.
 
 ---
 
-# 44. AI Architecture
+# 47. AI Architecture
 
 Le LLM doit être utilisé principalement pour les données non structurées :
 
@@ -1608,7 +1896,7 @@ Le modèle quantitatif reste responsable de l'interprétation statistique.
 
 ---
 
-# 45. Modèle AI économique
+# 48. Modèle AI économique
 
 Il n'est pas nécessaire d'utiliser un gros modèle pour chaque événement.
 
@@ -1636,7 +1924,7 @@ Cela permet de réduire :
 
 ---
 
-# 46. V1 Development Roadmap
+# 49. V1 Development Roadmap
 
 ## Phase 1 — Core
 
@@ -1728,12 +2016,25 @@ Cela permet de réduire :
 ```text
 [ ] Signal fusion
 [ ] Risk checks
-[ ] Trade proposals
+[ ] U_rebalance vs U_donothing
+[ ] Partial rebalance (execution weight, urgency)
 [ ] Reason generation
 [ ] Alerts
 ```
 
-## Phase 10 — Dashboard
+## Phase 10 — Execution
+
+```text
+[ ] Cost model (spread, slippage, fees)
+[ ] Impact model / participation
+[ ] Fill model
+[ ] Order pricer
+[ ] Order optimizer
+[ ] Order proposals
+[ ] Execution feedback loop
+```
+
+## Phase 11 — Dashboard
 
 ```text
 [ ] Portfolio overview
@@ -1743,11 +2044,12 @@ Cela permet de réduire :
 [ ] Risk monitor
 [ ] News/events
 [ ] Decision history
+[ ] Execution monitor
 ```
 
 ---
 
-# 47. Final target architecture
+# 50. Final target architecture
 
 ```text
                            ┌───────────────────────┐
@@ -1799,18 +2101,24 @@ Cela permet de réduire :
                             │
                   ┌─────────┴─────────┐
                   ▼                   ▼
-             DASHBOARD             ALERTS
+             UREBALANCE          UDONOTHING
                   │
                   ▼
-            TRADE PROPOSAL
+           EXECUTION ENGINE
                   │
                   ▼
-          HUMAN / EXECUTION
+            ORDER PROPOSAL ──────► DASHBOARD / ALERTS
+                  │
+                  ▼
+       HUMAN / BROKER EXECUTION
+                  │
+                  ▼
+           OBSERVE RESULT ───────► ONLINE LEARNING
 ```
 
 ---
 
-# 48. Design principles
+# 51. Design principles
 
 Le projet doit respecter les principes suivants :
 
@@ -1829,10 +2137,13 @@ Le projet doit respecter les principes suivants :
 13. **Models update at frequencies appropriate to their timescale**
 14. **Portfolio risk is evaluated globally, not position-by-position only**
 15. **Every target allocation must have an explainable reason**
+16. **No BUY / SELL: only UREBALANCE or UDONOTHING**
+17. **Deciding to rebalance and deciding how to execute are separate problems**
+18. **Alpha and execution are learned by two separate loops**
 
 ---
 
-# 49. First implementation milestone
+# 52. First implementation milestone
 
 La première milestone concrète est volontairement petite :
 
@@ -1877,11 +2188,42 @@ Puis seulement :
 ```text
 Target Allocation
       ↓
-Trade Proposal
+UREBALANCE / UDONOTHING
+      ↓
+Execution Engine
+      ↓
+Order Proposal
       ↓
 Dashboard
       ↓
-Optional Execution
+Optional Broker Execution
+```
+
+La philosophie en une ligne :
+
+```text
+REAL-TIME DATA
+      ↓
+FEATURES
+      ↓
+ONLINE MODELS
+      ↓
+SIGNALS
+      ↓
+RISK
+      ↓
+TARGET ALLOCATION
+      ↓
+UREBALANCE / UDONOTHING
+      ↓
+EXECUTION OPTIMIZATION
+      ↓
+ORDER PROPOSAL
+      ↓
+OBSERVE RESULT
+      ↓
+ONLINE LEARNING
+      └──────────────→
 ```
 
 **Objectif final : construire une sorte de "control tower" quantitative du portefeuille : le système observe continuellement le marché, apprend progressivement, maintient une représentation probabiliste de l'état de chaque actif et du portefeuille, intègre les informations fondamentales et qualitatives, mesure le risque global et explique en temps réel pourquoi l'allocation cible évolue.**

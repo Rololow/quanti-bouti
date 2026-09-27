@@ -1,4 +1,4 @@
-"""État de marché courant par symbole (README §35 — MarketState)."""
+"""État de marché courant par symbole (README §38 — MarketState)."""
 
 from __future__ import annotations
 

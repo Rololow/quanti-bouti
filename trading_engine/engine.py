@@ -1,4 +1,4 @@
-"""Assemblage de la boucle principale (README §37, milestone §49 — partie Core).
+"""Assemblage de la boucle principale (README §40, milestone §52 — partie Core).
 
     Feed → EventBus → MarketState / BarBuilder / EWMA / Portfolio → console
 """
