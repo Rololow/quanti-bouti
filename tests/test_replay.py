@@ -18,8 +18,10 @@ def _config(**overrides):
     feed = dataclasses.replace(cfg.feed, **overrides.pop("feed", {}))
     storage = dataclasses.replace(cfg.storage, **overrides.pop("storage", {}))
     allocation = dataclasses.replace(cfg.allocation, **overrides.pop("allocation", {}))
+    # résultats simulés toutes les 4 h : le test ne couvre que 11 h de marché
+    qualitative = dataclasses.replace(cfg.qualitative, sim_earnings_every="4h")
     return dataclasses.replace(cfg, engine=engine, feed=feed, storage=storage,
-                               allocation=allocation,
+                               allocation=allocation, qualitative=qualitative,
                                risk=dataclasses.replace(cfg.risk, min_observations=5),  # 8000 événements = 11 h
                                **overrides)
 
