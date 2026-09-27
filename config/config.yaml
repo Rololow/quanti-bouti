@@ -2,9 +2,9 @@
 
 engine:
   # Nombre d'événements traités avant l'arrêt (null = infini).
-  max_events: 2000
+  max_events: 20000
   # Affichage console toutes les N trades.
-  report_every: 250
+  report_every: 5000
 
 feed:
   # "simulated" (flux déterministe, sans clé) ou "alpaca" (temps réel).
@@ -13,7 +13,7 @@ feed:
   symbols: [SPY, QQQ, TLT, GLD]
   seed: 42
   # Intervalle entre deux trades simulés (secondes de temps de marché).
-  tick_seconds: 1.0
+  tick_seconds: 5.0
   alpaca:
     # "iex" (plan gratuit) ou "sip" (plan payant). url permet de forcer un
     # autre endpoint, ex. wss://stream.data.alpaca.markets/v2/test.
@@ -28,6 +28,15 @@ feed:
 
 bars:
   timeframes: [5m, 1h, 1d]
+
+features:
+  # Horizons de momentum ; chacun est calculé sur la plus longue barre qui le
+  # divise (30m = 6 barres 5m, 20d = 20 barres 1d).
+  momentum_horizons: [5m, 30m, 1h, 1d, 20d, 60d, 252d]
+  mean_reversion_timeframes: [5m]
+  zscore_window: 20
+  # null = tous les timeframes de barres
+  correlation_timeframes: [5m, 1h, 1d]
 
 volatility:
   # Facteur de décroissance EWMA (RiskMetrics : 0.94 en daily).

@@ -18,8 +18,9 @@ python -m trading_engine.main
 pytest
 ```
 
-État actuel : Phase 1 (Core) + Phase 2 (Realtime) + volatilité EWMA et barres
-5m / 1h / 1d.
+État actuel : Phase 1 (Core), Phase 2 (Realtime) et Phase 3 (Features :
+rendements, volatilité EWMA, momentum multi-horizon normalisé, mean reversion,
+VWAP, corrélations EWMA) sur des barres 5m / 1h / 1d.
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -1952,11 +1953,11 @@ Cela permet de réduire :
 ## Phase 3 — Features
 
 ```text
-[ ] Returns
-[ ] Momentum
+[x] Returns
+[x] Momentum
 [x] EWMA volatility
-[ ] Mean reversion
-[ ] Correlation
+[x] Mean reversion
+[x] Correlation
 ```
 
 ## Phase 4 — Online Models

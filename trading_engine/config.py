@@ -53,11 +53,20 @@ class PortfolioConfig:
 
 
 @dataclass(frozen=True)
+class FeaturesConfig:
+    momentum_horizons: tuple[str, ...] = ("5m", "30m", "1h", "1d", "20d", "60d", "252d")
+    mean_reversion_timeframes: tuple[str, ...] = ("5m",)
+    zscore_window: int = 20
+    correlation_timeframes: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     engine: EngineConfig = field(default_factory=EngineConfig)
     feed: FeedConfig = field(default_factory=FeedConfig)
     bar_timeframes: tuple[str, ...] = ("5m", "1h", "1d")
     ewma_lambda: float = 0.94
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
     portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
 
     @classmethod
@@ -67,6 +76,9 @@ class Config:
         bars = raw.get("bars") or {}
         vol = raw.get("volatility") or {}
         pf = raw.get("portfolio") or {}
+        feats = raw.get("features") or {}
+        default_feats = FeaturesConfig()
+        corr_tfs = feats.get("correlation_timeframes")
 
         ewma_lambda = float(vol.get("lambda", 0.94))
         if not 0.0 < ewma_lambda < 1.0:
@@ -86,6 +98,16 @@ class Config:
             ),
             bar_timeframes=tuple(bars.get("timeframes", ("5m", "1h", "1d"))),
             ewma_lambda=ewma_lambda,
+            features=FeaturesConfig(
+                momentum_horizons=tuple(
+                    feats.get("momentum_horizons", default_feats.momentum_horizons)
+                ),
+                mean_reversion_timeframes=tuple(
+                    feats.get("mean_reversion_timeframes", default_feats.mean_reversion_timeframes)
+                ),
+                zscore_window=int(feats.get("zscore_window", default_feats.zscore_window)),
+                correlation_timeframes=None if corr_tfs is None else tuple(corr_tfs),
+            ),
             portfolio=PortfolioConfig(
                 cash=float(pf.get("cash", 0.0)),
                 positions={

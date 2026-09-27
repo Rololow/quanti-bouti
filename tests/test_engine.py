@@ -26,3 +26,29 @@ def test_engine_is_deterministic():
     _, a = _run(1000)
     _, b = _run(1000)
     assert a == b
+
+
+def test_bars_close_on_market_clock_for_idle_symbols(t0):
+    from datetime import timedelta
+
+    from trading_engine.data.events import TradeEvent
+    from trading_engine.data.market_feed import MarketFeed
+
+    class ListFeed(MarketFeed):
+        def __init__(self, events):
+            self.events = events
+
+        async def __aiter__(self):
+            for ev in self.events:
+                yield ev
+
+    def trade(sym, minutes, price):
+        return TradeEvent(timestamp=t0 + timedelta(minutes=minutes), symbol=sym,
+                          source="t", price=price, size=1)
+
+    feed = ListFeed([trade("SPY", 0, 100), trade("TLT", 1, 90), trade("SPY", 6, 101)])
+    engine = Engine(load_config(), feed=feed)
+    asyncio.run(engine.run())
+
+    closed_5m = {(b.symbol, b.timeframe) for b in engine.bars}
+    assert ("TLT", "5m") in closed_5m  # TLT n'a plus tradé mais sa barre est close

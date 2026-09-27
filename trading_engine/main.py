@@ -32,6 +32,23 @@ def print_state(state: PortfolioState) -> None:
         )
 
 
+def print_features(engine: Engine) -> None:
+    shown = ("mom_5m", "mom_30m", "mom_1h", "mom_1d", "z_5m", "vwap_dist")
+    print(f"  {'features':<8} " + " ".join(f"{name:>9}" for name in shown))
+    for sym in engine.features.symbols():
+        feats = engine.features.snapshot(sym)
+        print(f"  {sym:<8} " + " ".join(f"{_fmt(feats.get(name), '+.3f'):>9}" for name in shown))
+    for tf in engine.config.features.correlation_timeframes or engine.config.bar_timeframes:
+        if engine.features.correlation_updates(tf) < 2:
+            continue
+        symbols, corr = engine.features.correlation(tf)
+        pairs = [
+            f"{symbols[i]}/{symbols[j]} {corr[i, j]:+.2f}"
+            for i in range(len(symbols)) for j in range(i + 1, len(symbols))
+        ]
+        print(f"  corr {tf}: " + "  ".join(pairs))
+
+
 def print_feed_status(engine: Engine) -> None:
     status = getattr(engine.feed, "status", None)
     if status is None:
@@ -46,6 +63,7 @@ async def _run(config_path: str) -> None:
 
     def report(state: PortfolioState) -> None:
         print_state(state)
+        print_features(engine)
         print_feed_status(engine)
 
     engine = Engine(load_config(config_path), reporter=report)

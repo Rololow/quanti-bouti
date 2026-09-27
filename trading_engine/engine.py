@@ -1,6 +1,6 @@
 """Assemblage de la boucle principale (README §40, milestone §52 — partie Core).
 
-    Feed → EventBus → MarketState / BarBuilder / EWMA / Portfolio → console
+    Feed → EventBus → MarketState / BarBuilder / FeatureEngine / Portfolio → console
 """
 
 from __future__ import annotations
@@ -14,11 +14,9 @@ from trading_engine.data.event_bus import EventBus
 from trading_engine.data.events import BarEvent, EventType, QuoteEvent, TradeEvent
 from trading_engine.data.market_feed import MarketFeed, SimulatedMarketFeed
 from trading_engine.data.market_state import MarketStateStore
-from trading_engine.features.volatility import VolatilityBook
+from trading_engine.features.feature_engine import TICK, FeatureEngine
 from trading_engine.portfolio.portfolio import Portfolio, PortfolioState
 from trading_engine.portfolio.positions import Position
-
-TICK = "tick"
 
 
 class Engine:
@@ -32,7 +30,14 @@ class Engine:
         self.bus = EventBus()
         self.market_state = MarketStateStore()
         self.bar_builder = BarBuilder(config.bar_timeframes)
-        self.volatility = VolatilityBook(config.ewma_lambda)
+        self.features = FeatureEngine(
+            config.bar_timeframes,
+            momentum_horizons=config.features.momentum_horizons,
+            mean_reversion_timeframes=config.features.mean_reversion_timeframes,
+            zscore_window=config.features.zscore_window,
+            correlation_timeframes=config.features.correlation_timeframes,
+            lam=config.ewma_lambda,
+        )
         self.portfolio = Portfolio(
             cash=config.portfolio.cash,
             positions={
@@ -78,8 +83,11 @@ class Engine:
     async def _on_trade(self, event: TradeEvent) -> None:
         self.market_state.update(event)
         self.portfolio.update_price(event.symbol, event.price, event.timestamp)
-        self.volatility.update(event.symbol, TICK, event.price)
-        for bar in self.bar_builder.on_trade(event):
+        self.features.on_trade(event)
+        # L'horloge de marché (timestamp des trades) clôture les barres de
+        # tous les symboles, même ceux qui ne tradent pas.
+        closed = self.bar_builder.flush(event.timestamp) + self.bar_builder.on_trade(event)
+        for bar in sorted(closed, key=lambda b: (b.end, b.timeframe, b.symbol)):
             await self.bus.publish(bar)
 
         self.trade_count += 1
@@ -93,13 +101,10 @@ class Engine:
     def _on_bar(self, event: BarEvent) -> None:
         self.bars.append(event)
         self.market_state.update(event)
-        # Une barre corrigée (trades tardifs) remplace la précédente : ne pas
-        # la compter une seconde fois dans la volatilité.
-        if not event.payload.get("correction"):
-            self.volatility.update(event.symbol, event.timeframe, event.close)
+        self.features.on_bar(event)
 
     def snapshot(self) -> PortfolioState:
-        vols = {sym: self.volatility.get(sym, TICK) for sym in self.market_state.prices()}
+        vols = {sym: self.features.volatility.get(sym, TICK) for sym in self.market_state.prices()}
         return self.portfolio.snapshot(volatilities=vols)
 
     async def run(self) -> PortfolioState:
