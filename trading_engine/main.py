@@ -173,6 +173,21 @@ def print_qualitative(engine: Engine) -> None:
                   f"{len(c.providers)} source(s))")
 
 
+def print_ai(engine: Engine) -> None:
+    if engine.ai.analyzer is None and not any(engine.ai.events(s) for s in engine.features.symbols()):
+        return
+    st = engine.ai.stats
+    name = "journal" if engine.ai.analyzer is None else engine.ai.analyzer.name
+    print(f"  IA ({name}): analysées={st['accepted']} rejetées={st['rejected']} escalades={st['escalations']} "
+          f"échecs={st['failures']} doublons évités={st['skipped_duplicate']} hors budget={st['skipped_budget']}")
+    for sym in engine.features.symbols():
+        events = engine.ai.events(sym)
+        if events:
+            e = events[-1]
+            print(f"    {sym} {e.event_id} {e.event_type}: \"{e.description}\" impact {e.impact:+.2f} "
+                  f"confiance {e.confidence:.2f} confirmation {e.confirmation:.2f} ({len(e.analyses)} art.)")
+
+
 def print_models(engine: Engine) -> None:
     for sym in engine.features.symbols():
         regimes = engine.models.regimes(sym)
@@ -225,6 +240,7 @@ async def _run(args: argparse.Namespace) -> None:
         print_state(state)
         print_features(engine)
         print_qualitative(engine)
+        print_ai(engine)
         print_models(engine)
         print_risk(engine)
         print_safety(engine)

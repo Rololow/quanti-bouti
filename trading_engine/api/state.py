@@ -116,6 +116,18 @@ def build_state(engine, *, history: int = 500, decisions: int = 50, alerts: int 
                          "providers": sorted(p for p in c.providers if p)})
     news.sort(key=lambda n: n["first_seen"], reverse=True)
 
+    ai_events = []
+    for sym in symbols:
+        for e in engine.ai.events(sym)[-5:]:
+            ai_events.append({
+                "symbol": sym, "event_id": e.event_id, "first_seen": e.first_seen,
+                "event_type": e.event_type, "description": e.description, "impact": e.impact,
+                "confidence": e.confidence, "importance": e.importance,
+                "confirmation": e.confirmation, "articles": len(e.analyses),
+                "sources": sorted(e.qualities), "score": e.score(),
+            })
+    ai_events.sort(key=lambda e: e["first_seen"], reverse=True)
+
     fb = engine.execution_feedback
     plan = engine.last_plan
     tax_cost = engine.estimate_rebalance_tax()
@@ -147,6 +159,13 @@ def build_state(engine, *, history: int = 500, decisions: int = 50, alerts: int 
         "regimes": regimes,
         "qualitative": qualitative,
         "news": news[:20],
+        "ai": {
+            "analyzer": None if engine.ai.analyzer is None else engine.ai.analyzer.name,
+            "model": engine.config.ai.model if engine.ai.analyzer is not None
+                     and engine.ai.analyzer.name == "claude" else None,
+            "stats": engine.ai.stats,
+            "events": ai_events[:15],
+        },
         "allocation": engine.last_allocation,
         "stress": engine.last_stress,
         "drift": engine.drift_report(),

@@ -30,6 +30,7 @@ class EventType(str, Enum):
     RISK = "risk"
     DECISION = "decision"
     ALERT = "alert"
+    NEWS_ANALYSIS = "news_analysis"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -149,6 +150,23 @@ class RiskEvent(Event):
 @dataclass(frozen=True, kw_only=True)
 class DecisionEvent(Event):
     event_type = EventType.DECISION
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewsAnalysisEvent(Event):
+    """Sortie structurée (validée) de l'IA pour une news (README §23-26).
+
+    `timestamp` = publication de la news ; `received_at` = moment où l'analyse
+    est disponible (après la latence du modèle) : elle n'est jamais utilisée
+    avant. L'analyse elle-même est dans `payload`. Enregistrée dans le
+    journal : le replay la relit sans rappeler le modèle.
+    """
+
+    news_id: str
+    headline: str = ""
+    model: str = ""
+
+    event_type = EventType.NEWS_ANALYSIS
 
 
 @dataclass(frozen=True, kw_only=True)

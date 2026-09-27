@@ -242,6 +242,22 @@ qualitative:
     news_every: 3h
     duplicate_probability: 0.5
 
+ai:
+  # Extraction structurée des news par LLM (texte -> données, jamais -> décision).
+  # auto : simulé si le marché est simulé, sinon désactivé.
+  # claude : API Claude (ANTHROPIC_API_KEY ou `ant auth login`) ; payant.
+  provider: auto            # auto | none | simulated | claude
+  model: claude-opus-5
+  fast_effort: low          # 1er passage, peu coûteux
+  escalated_effort: high    # 2e passage si validation échouée ou confiance < seuil
+  escalate_below_confidence: 0.6
+  min_confidence: 0.5       # en dessous : l'analyse n'alimente aucun signal
+  max_calls_per_hour: 120   # budget d'appels
+  important_threshold: 0.7  # alerte IMPORTANT_NEWS (importance et confiance)
+  extract_fundamentals: true
+  server_fallbacks: true    # si le modèle décline, l'API rejoue sur un modèle de repli
+  simulated_latency_seconds: 5
+
 tax:
   # Profil fiscal du pays de résidence (null = pas de fiscalité).
   # Voir config/taxes/BE.toml : à vérifier avant tout usage réel.

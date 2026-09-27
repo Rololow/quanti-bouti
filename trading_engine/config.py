@@ -228,6 +228,27 @@ class QualitativeConfig:
 
 
 @dataclass(frozen=True)
+class AISettings:
+    # auto : simulé si le marché est simulé, sinon aucun (Claude coûte de
+    # l'argent : il doit être activé explicitement) ; none | simulated | claude
+    provider: str = "auto"
+    model: str = "claude-opus-5"
+    fast_effort: str = "low"
+    escalated_effort: str = "high"
+    escalate_below_confidence: float = 0.6
+    min_confidence: float = 0.5
+    max_calls_per_hour: int = 120
+    important_threshold: float = 0.7
+    extract_fundamentals: bool = True
+    server_fallbacks: bool = True
+    simulated_latency_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if self.provider not in ("auto", "none", "simulated", "claude"):
+            raise ValueError(f"ai.provider must be auto, none, simulated or claude, got {self.provider!r}")
+
+
+@dataclass(frozen=True)
 class TaxConfig:
     profile: str | None = None                     # ex. config/taxes/BE.toml ; None = pas de fiscalité
     step_up_prices: Mapping[str, float] = field(default_factory=dict)
@@ -254,6 +275,7 @@ class Config:
     alerts: AlertConfig = field(default_factory=AlertConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     qualitative: QualitativeConfig = field(default_factory=QualitativeConfig)
+    ai: AISettings = field(default_factory=AISettings)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -343,6 +365,7 @@ class Config:
             }),
             execution=_execution_config(raw.get("execution") or {}),
             qualitative=_qualitative_config(raw.get("qualitative") or {}),
+            ai=AISettings(**(raw.get("ai") or {})),
             alerts=AlertConfig(**{
                 k: tuple(v) if k == "regime_horizons" else v
                 for k, v in (raw.get("alerts") or {}).items()

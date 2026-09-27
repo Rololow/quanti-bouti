@@ -19,6 +19,7 @@ Noms des features (dictionnaire plat, prêt pour les modèles online) :
     vwap_dist         distance au VWAP de séance
     fund_* / qual_score   fondamentaux point-in-time (si branchés)
     news_*            activité news dédupliquée (si branchée)
+    ai_*              score événementiel issu de l'extraction IA validée
 
 Les fondamentaux et les news sont lus « as of » l'horloge de marché
 (`now` = dernier timestamp de trade ou de fin de barre) : aucune information
@@ -56,7 +57,9 @@ class FeatureEngine:
         lam: float = 0.94,
         fundamentals=None,
         news=None,
+        ai=None,
     ) -> None:
+        self.ai = ai                          # NewsIntelligence | None
         self.fundamentals = fundamentals      # FundamentalFeatures | None
         self.news = news                      # NewsEngine | None
         self.now: datetime | None = None      # horloge de marché
@@ -182,6 +185,8 @@ class FeatureEngine:
             out.update(self.fundamentals.snapshot(symbol, self.now))
         if self.news is not None:
             out.update(self.news.snapshot(symbol, self.now))
+        if self.ai is not None:
+            out.update(self.ai.snapshot(symbol, self.now))
         return out
 
     def correlation(self, timeframe: str) -> tuple[list[str], np.ndarray]:

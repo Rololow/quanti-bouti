@@ -574,7 +574,23 @@ function renderNews(st) {
     el("td", { class: `num ${signCls(q.fund_eps_surprise)}` }, spct(q.fund_eps_surprise)), el("td", { class: "num" }, spct(q.fund_eps_growth)),
     el("td", { class: "num" }, spct(q.fund_guidance_change)), el("td", { class: `num ${signCls(q.qual_score)}` }, num(q.qual_score)),
     el("td", { class: "num" }, num(q.news_activity))));
-  replace("news", st.news.length ? list : empty("Aucune news."),
+  const ai = st.ai || { events: [], stats: {} };
+  const aiHead = el("tr", {}, ["Heure", "Symbole", "Type", "Événement", "Impact", "Confiance", "Confirm.", "Art."].map((h, i) =>
+    el("th", { class: i > 3 ? "num" : "" }, h)));
+  const aiRows = ai.events.slice(0, 8).map((e) => el("tr", {},
+    el("td", {}, time(e.first_seen)), el("td", {}, e.symbol), el("td", {}, e.event_type),
+    el("td", { style: "white-space:normal" }, e.description),
+    el("td", { class: `num ${signCls(e.impact)}` }, num(e.impact)), el("td", { class: "num" }, num(e.confidence)),
+    el("td", { class: "num" }, num(e.confirmation)), el("td", { class: "num" }, e.articles)));
+  const s = ai.stats || {};
+  const aiBlock = ai.analyzer ? [
+    el("h2", { style: "margin-top:14px" }, `Événements extraits par l'IA (${ai.analyzer}${ai.model ? " · " + ai.model : ""})`),
+    el("div", { class: "meta" }, [["analysées", s.accepted], ["rejetées", s.rejected], ["escalades", s.escalations],
+      ["échecs", s.failures], ["doublons évités", s.skipped_duplicate], ["hors budget", s.skipped_budget]]
+      .map(([k, v]) => el("span", { class: "chip" }, `${k} ${v ?? 0}`))),
+    aiRows.length ? el("div", { class: "scroll", style: "margin-top:8px" }, el("table", {}, el("thead", {}, aiHead), el("tbody", {}, aiRows))) : empty("Aucun événement extrait."),
+  ] : [];
+  replace("news", st.news.length ? list : empty("Aucune news."), ...aiBlock,
     el("div", { class: "scroll", style: "margin-top:12px" }, el("table", {}, el("thead", {}, head), el("tbody", {}, rows))));
 }
 

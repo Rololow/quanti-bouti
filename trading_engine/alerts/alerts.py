@@ -14,8 +14,8 @@ quand une condition apparaît (pas à chaque évaluation tant qu'elle dure).
     NEW_EARNINGS          nouveaux résultats publiés (avec la surprise)
     GUIDANCE_CHANGE       nouvelle guidance, variation >= seuil
 
-(IMPORTANT_NEWS viendra avec la phase IA : l'importance d'une news demande
-une lecture structurée.)
+    IMPORTANT_NEWS        événement jugé important et confiant par l'IA (une fois
+                          par événement, quel que soit le nombre d'articles)
 """
 
 from __future__ import annotations
@@ -91,6 +91,7 @@ class AlertEngine:
         decision=None,
         earnings: Mapping[str, tuple[datetime, float | None]] | None = None,
         guidance: Mapping[str, tuple[datetime, float]] | None = None,
+        important_news: list | None = None,
     ) -> list[Alert]:
         """`earnings` : symbole -> (publication, surprise) du dernier EPS publié ;
         `guidance` : symbole -> (publication, variation) de la dernière guidance."""
@@ -169,6 +170,14 @@ class AlertEngine:
                     events.append(Alert("GUIDANCE_CHANGE", sym, timestamp,
                                         f"guidance EPS {change:+.1%}", "warning"))
                 self._last_published[key] = published
+
+        for ev in important_news or []:
+            sources = len(ev.qualities)
+            events.append(Alert(
+                "IMPORTANT_NEWS", ev.symbol, timestamp,
+                f"{ev.event_type}: {ev.description} (impact {ev.impact:+.2f}, confiance "
+                f"{ev.confidence:.2f}, {sources} source(s))",
+                "warning"))
 
         if decision is not None and decision.action == "UREBALANCE":
             events.append(Alert("REBALANCE_PROPOSED", None, timestamp,

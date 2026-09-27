@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+ai = ["anthropic>=1.0"]      # extraction des news par Claude (ai.provider: claude)
 
 [tool.setuptools.packages.find]
 include = ["trading_engine*"]

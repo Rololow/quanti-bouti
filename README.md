@@ -20,6 +20,9 @@ python -m trading_engine.main --dashboard --keep-open
 # Dashboard autonome d'une simulation ou d'un replay (un seul fichier HTML)
 python -m trading_engine.main --quiet --export-dashboard dashboard.html
 
+# Extraction des news par Claude (payant ; ANTHROPIC_API_KEY ou `ant auth login`)
+pip install -e ".[ai]"   # puis dans config.yaml : ai.provider: claude
+
 # Tests
 pytest
 ```
@@ -43,8 +46,10 @@ rebalancement partiel, hystérésis, raisons, alertes, journal des décisions),
 Phase 13 (exécution : coûts et impact, fill model, pricer, optimiseur
 d'ordres, paper broker, boucle de feedback et confiance d'exécution), Phase 10
 (fondamentaux point-in-time, earnings, guidance, SEC EDGAR, news Alpaca
-dédupliquées en événements), Phase 14 (dashboard temps réel en lecture seule
-et export HTML autonome) et profils fiscaux par pays (TOML, Belgique
+dédupliquées en événements), Phase 11 (extraction structurée des news par
+Claude, validation, dédoublonnage sémantique, qualité des sources, score
+événementiel, IMPORTANT_NEWS), Phase 14 (dashboard temps réel en lecture
+seule et export HTML autonome) et profils fiscaux par pays (TOML, Belgique
 fournie).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
@@ -2101,6 +2106,34 @@ Cela permet de réduire :
 
 ---
 
+## Implémentation (`ai/`)
+
+```text
+schemas.py            schéma JSON strict de l'extraction + prompt système
+                      (extraire, jamais recommander ; texte de l'article = donnée
+                      non fiable, ses instructions sont ignorées)
+news_analyzer.py      ClaudeNewsAnalyzer : sortie structurée (json_schema), effort,
+                      fallbacks serveur si le modèle décline ; stop_reason vérifié ;
+                      SimulatedNewsAnalyzer déterministe (simulation, tests)
+validation.py         schéma, bornes (rejet, pas de correction silencieuse),
+                      cohérence, qualité de source, rumeurs, plausibilité des chiffres,
+                      confiance minimale
+news_intelligence.py  cascade d'effort (low -> high sur le même modèle), budget
+                      d'appels, dédoublonnage sémantique (le modèle voit les
+                      événements récents et désigne un doublon), score =
+                      impact × confiance × confirmation (sources distinctes),
+                      features ai_*, fondamentaux extraits, IMPORTANT_NEWS
+```
+
+Chaque analyse devient un `NewsAnalysisEvent` reçu **après** la latence du
+modèle et enregistré dans le journal : l'information n'est jamais utilisée
+avant d'être disponible, et le replay relit les analyses sans rappeler le
+modèle (même résultat, aucun coût). Les chiffres extraits d'une news ne
+deviennent des faits fondamentaux qu'à la réception de l'analyse, jamais à
+partir d'une rumeur ou d'une source peu fiable.
+
+---
+
 # 49. Limites et garde-fous
 
 L'architecture empile beaucoup de modèles
@@ -2609,16 +2642,16 @@ Le moteur :
 ## Phase 11 — AI
 
 ```text
-[ ] Structured output schema
-[ ] News extraction
-[ ] Event classification
-[ ] Sentiment
-[ ] Novelty
-[ ] Confidence
-[ ] Fundamental extraction
-[ ] Validation pipeline (schema, range, source)
-[ ] Event deduplication / clustering
-[ ] Source quality / diversity
+[x] Structured output schema
+[x] News extraction (Claude, sortie structurée)
+[x] Event classification
+[x] Sentiment
+[x] Novelty
+[x] Confidence
+[x] Fundamental extraction
+[x] Validation pipeline (schema, range, source)
+[x] Event deduplication / clustering (sémantique via le modèle)
+[x] Source quality / diversity
 ```
 
 ## Phase 12 — Decision Engine

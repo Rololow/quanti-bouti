@@ -46,6 +46,9 @@ from trading_engine.data.merge import ConcurrentFeed, TimeMergedFeed
 from trading_engine.data.simulated_qualitative import SimulatedQualitativeFeed
 from trading_engine.features.feature_engine import FeatureEngine
 from trading_engine.features.fundamentals import FundamentalFeatures
+from trading_engine.ai.news_analyzer import ClaudeNewsAnalyzer, SimulatedNewsAnalyzer
+from trading_engine.ai.news_intelligence import AIConfig, NewsIntelligence
+from trading_engine.data.events import NewsAnalysisEvent
 from trading_engine.news.news_engine import NewsEngine
 from trading_engine.models.model_engine import ModelEngine
 from trading_engine.portfolio.portfolio import Portfolio, PortfolioState
@@ -95,6 +98,18 @@ class Engine:
             similarity=q.news.similarity, window=parse_timeframe(q.news.window),
             activity_half_life=parse_timeframe(q.news.activity_half_life),
         )
+        self.ai = NewsIntelligence(
+            self._build_analyzer(),
+            AIConfig(
+                fast_effort=config.ai.fast_effort, escalated_effort=config.ai.escalated_effort,
+                escalate_below_confidence=config.ai.escalate_below_confidence,
+                min_confidence=config.ai.min_confidence, max_calls_per_hour=config.ai.max_calls_per_hour,
+                important_threshold=config.ai.important_threshold,
+                extract_fundamentals=config.ai.extract_fundamentals,
+                simulated_latency=timedelta(seconds=config.ai.simulated_latency_seconds),
+            ),
+            last_eps=lambda sym, t: getattr(self.fundamentals.store.latest(sym, "eps", t), "value", None),
+        )
         self.features = FeatureEngine(
             config.bar_timeframes,
             momentum_horizons=config.features.momentum_horizons,
@@ -104,6 +119,7 @@ class Engine:
             lam=config.ewma_lambda,
             fundamentals=self.fundamentals,
             news=self.news,
+            ai=self.ai,
         )
         self.models = ModelEngine(config.models, self.features)
         self.portfolio = Portfolio(
@@ -170,6 +186,7 @@ class Engine:
         self.bus.subscribe(EventType.BAR, self._on_bar)
         self.bus.subscribe(EventType.FUNDAMENTAL, self._on_fundamental)
         self.bus.subscribe(EventType.NEWS, self._on_news)
+        self.bus.subscribe(EventType.NEWS_ANALYSIS, self._on_news_analysis)
 
     def _build_tax_model(self) -> TaxModel | None:
         if not self.config.tax.profile:
@@ -206,6 +223,17 @@ class Engine:
         prices = {p.symbol: p.price for p in state.positions}
         when = state.timestamp or datetime.now(timezone.utc)
         return self.tax.rebalance_cost(trades, prices, when)
+
+    def _build_analyzer(self):
+        provider = self.config.ai.provider
+        if provider == "auto":
+            provider = "simulated" if self.config.feed.provider == "simulated" else "none"
+        if provider == "simulated":
+            return SimulatedNewsAnalyzer()
+        if provider == "claude":
+            return ClaudeNewsAnalyzer(model=self.config.ai.model,
+                                      server_fallbacks=self.config.ai.server_fallbacks)
+        return None          # none, ou replay : les analyses viennent du journal
 
     def _qualitative_provider(self, provider: str) -> str:
         if provider == "auto":
@@ -288,6 +316,12 @@ class Engine:
 
     def _on_news(self, event: NewsEvent) -> None:
         self.news.on_news(event)
+        self.ai.submit(event)
+
+    def _on_news_analysis(self, event: NewsAnalysisEvent) -> None:
+        _, facts = self.ai.on_analysis(event)
+        for fact in facts:
+            self.fundamentals.store.add(fact)
 
     async def _on_trade(self, event: TradeEvent) -> None:
         self.market_state.update(event)
@@ -558,6 +592,7 @@ class Engine:
             decision=decision,
             earnings=self._latest_earnings(symbols),
             guidance=self._latest_guidance(symbols),
+            important_news=[] if self.features.now is None else self.ai.important_events(self.features.now),
         )
         for alert in alerts:
             self.alerts.append(alert)
@@ -671,22 +706,32 @@ class Engine:
         rcs = {s: p.risk_share for s, p in report.positions.items()}
         return self.portfolio.snapshot(volatilities=vols, risk_contributions=rcs)
 
+    async def _ingest(self, event) -> None:
+        # Le journal garde les données brutes : le replay refait les mêmes
+        # contrôles d'intégrité.
+        if self.recorder is not None:
+            self.recorder.write(event)
+        checked = self.integrity.check(event)
+        for issue in checked.issues:
+            self.data_issues.append(issue)
+            if issue.severity >= REJECT:
+                logger.warning("data rejected: %s", issue)
+        for accepted in checked.accepted:
+            await self.bus.publish(accepted)
+            if self._interval_due:
+                await self._on_interval()
+
     async def run(self) -> PortfolioState:
         try:
             async for event in self.feed:
-                # Le journal garde les données brutes : le replay refait les
-                # mêmes contrôles d'intégrité.
-                if self.recorder is not None:
-                    self.recorder.write(event)
-                checked = self.integrity.check(event)
-                for issue in checked.issues:
-                    self.data_issues.append(issue)
-                    if issue.severity >= REJECT:
-                        logger.warning("data rejected: %s", issue)
-                for accepted in checked.accepted:
-                    await self.bus.publish(accepted)
-                    if self._interval_due:
-                        await self._on_interval()
+                # Les analyses IA disponibles avant cet événement passent d'abord
+                # (et sont journalisées) : même ordre en live et en replay.
+                for analysis in self.ai.release(event.received_at):
+                    await self._ingest(analysis)
+                await self._ingest(event)
+            await self.ai.drain()
+            for analysis in self.ai.release(None):
+                await self._ingest(analysis)
         finally:
             if self.recorder is not None:
                 self.recorder.close()
