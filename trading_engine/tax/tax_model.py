@@ -306,7 +306,7 @@ class TaxModel:
         cg = self.profile.capital_gains
         if cg is not None and cg.speculative_warning:
             out.append(cg.speculative_warning)
-        if self.needs_fx and self.fx is None:
+        if self.needs_fx and self.fx is None and self.fx_missing:
             out.append(f"pas de taux {self.profile.currency}/{self.portfolio_currency} : montants non convertis")
         if self.fx is not None and self.fx.before_first:
             out.append(f"{self.fx.before_first} conversion(s) avant le premier taux connu ({self.fx.first})")
