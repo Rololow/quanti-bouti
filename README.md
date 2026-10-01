@@ -79,6 +79,50 @@ Le plan Alpaca gratuit donne accès au flux `iex`. Le client gère la
 reconnexion (backoff exponentiel), le heartbeat (ping WebSocket en cas
 d'inactivité) et horodate chaque événement (heure bourse + heure de réception).
 
+### Backtest sur données réelles
+
+Avant de faire confiance au moteur, il faut savoir s'il bat des stratégies
+simples **après coûts et TOB**. Le backtest rejoue des années de barres 30 min
+Alpaca dans le moteur **inchangé** (chaque barre devient des trades
+synthétiques ouverture → plus bas/haut → clôture) et le compare à :
+
+- buy & hold équipondéré ;
+- risk parity mensuelle (poids ∝ 1/volatilité) ;
+- le moteur **sans modèles** (risk parity + Decision Engine, sans alpha),
+  qui isole ce qu'apportent les modèles.
+
+```bash
+export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...
+# 1. données (une fois) : barres des séances régulières + taux BCE
+python -m trading_engine.backtest download --start 2018-01-01 --end 2026-09-30
+# 2. backtest (une exécution par variante et par valeur de la grille, en parallèle)
+python -m trading_engine.backtest run
+# sans clé, pour vérifier la chaîne (données synthétiques, aucun edge)
+python -m trading_engine.backtest synthetic --start 2022-01-01 --end 2024-12-31
+python -m trading_engine.backtest run --data data/backtest/synthetic_30m.jsonl
+```
+
+La config du backtest est `config/config.yaml` + la surcouche
+`config/backtest.yaml` (réglages 5m remplacés par 30m/1h, départ en cash).
+Le rapport (`data/backtest/report.json` et `.md`) donne, sur la fenêtre
+d'évaluation (par défaut tout sauf la première année, qui sert de
+démarrage) : CAGR, volatilité, Sharpe, drawdown maximal, en USD et en EUR
+(cours BCE du jour), turnover, TOB payée, et le nombre d'arrêts du Safety
+Engine (le runner relance après une séance, comme un opérateur).
+
+**Walk-forward** : le paramètre testé par défaut est l'horizon de détention
+(`decision.holding_period` : 20, 60, 120 jours ; le bénéfice d'un
+rebalancement est proportionnel à aversion au risque × horizon). Chaque année
+d'évaluation utilise la valeur qui avait le meilleur Sharpe sur les années
+précédentes ; la ligne « walk-forward » est le seul résultat hors
+échantillon. Autres grilles : `--grid decision.risk_aversion=5,20 --grid
+decision.holding_period=60d,120d`.
+
+Limites : chemin intra-barre approximé ; pas de cotations historiques
+(spread par défaut) ; prix ajustés des dividendes mais précompte non déduit ;
+impôt sur les plus-values non déduit des séries ; références exécutées à la
+clôture avec fractions d'actions (hypothèse favorable aux références).
+
 ### Tester avec un compte Alpaca **paper**
 
 Le mode `alpaca_paper` envoie les ordres validés par les hard controls au
@@ -2775,6 +2819,7 @@ Le moteur :
 [x] Calendrier de marché (séances, fériés, clôtures anticipées)
 [x] Change EUR/USD (cours BCE) dans la fiscalité
 [x] Registre fiscal persistant (lots datés, plus-values, TOB à déclarer)
+[x] Backtest sur données historiques (références, walk-forward, rapport USD/EUR)
 ```
 
 ## Phase 14 — Dashboard

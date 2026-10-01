@@ -1,0 +1,69 @@
+# Surcouche de config/config.yaml pour le backtest sur barres historiques 30m
+# (python -m trading_engine.backtest run). Seules les clés listées changent.
+#
+# Les réglages en 5m du live n'ont pas de sens avec des barres de 30 minutes :
+# features, prédicteurs, volume et durées d'ordres passent en 30m / 1h.
+
+engine:
+  max_events: null
+  report_every: 0
+
+feed:
+  provider: dataset
+  dataset_path: data/backtest/bars_30m.jsonl
+
+bars:
+  timeframes: [30m, 1h, 1d]
+
+features:
+  momentum_horizons: [30m, 1h, 1d, 20d, 60d, 252d]
+  mean_reversion_timeframes: [30m]
+  correlation_timeframes: [1h, 1d]
+
+allocation:
+  method: signal
+  rebalance_timeframe: 1h
+
+# Horizon sur lequel le bénéfice d'un rebalancement est compté (≈ durée de
+# détention). Le bénéfice est ∝ aversion au risque × horizon : avec 5 jours,
+# sortir du cash ne couvre jamais la TOB. C'est le paramètre du walk-forward.
+decision:
+  holding_period: 60d
+
+models:
+  regimes:
+    timeframes: {HF: 30m, MT: 1h, LT: 1d}
+    refit_every: 200       # ré-ajustement Baum-Welch moins fréquent (coût sur des années)
+  predictors:
+    - name: trend
+      timeframe: 30m
+      horizon_bars: 13     # une séance
+      features: [mom_1h, mom_1d]
+      forgetting: 0.999
+      ridge: 10.0
+      min_samples: 200
+    - name: reversion
+      timeframe: 30m
+      horizon_bars: 13
+      features: [z_30m, reversal_30m, vwap_dist]
+      forgetting: 0.999
+      ridge: 10.0
+      min_samples: 200
+
+integrity:
+  stale_after: 1800.0      # trades synthétiques espacés de 7,5 à 12 min
+
+execution:
+  mode: paper
+  volume_timeframe: 30m
+  optimizer:
+    durations: [30m, 1h, 2h]
+    alpha_half_life: 1d
+
+alerts:
+  vol_fast: 30m
+
+# Départ en cash ; les benchmarks partent du même montant.
+portfolio:
+  cash: 100000.0
+  positions: {}

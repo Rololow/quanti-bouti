@@ -60,6 +60,7 @@ class FeedConfig:
     annual_vol: float = 0.20
     sim_speed: float = 0.0             # 0 = max ; 1 = temps réel ; 60 = 60× plus vite
     replay_path: str | None = None
+    dataset_path: str | None = None    # provider dataset : barres historiques (backtest)
     alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
 
 
@@ -383,6 +384,7 @@ class Config:
                 annual_vol=float(feed.get("annual_vol", 0.20)),
                 sim_speed=float(feed.get("sim_speed", 0.0)),
                 replay_path=feed.get("replay_path"),
+                dataset_path=feed.get("dataset_path"),
                 alpaca=AlpacaConfig(**(feed.get("alpaca") or {})),
             ),
             bar_timeframes=tuple(bars.get("timeframes", ("5m", "1h", "1d"))),
@@ -466,6 +468,24 @@ def _execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
     return ExecutionConfig(cost=cost, optimizer=OptimizerConfig(**opt), **raw)
 
 
-def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
+def deep_merge(base: dict, overlay: dict) -> dict:
+    """Fusion récursive : les dictionnaires sont fusionnés, le reste (listes
+    comprises) est remplacé par la valeur de la surcouche. Un dictionnaire
+    vide remplace (ex. `positions: {}` = aucune position)."""
+    out = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and value and isinstance(out.get(key), dict):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def load_config(path: str | Path = DEFAULT_CONFIG_PATH, overlays: tuple[str | Path, ...] = ()) -> Config:
+    """Config de base + surcouches éventuelles (ex. config/backtest.yaml)."""
     with open(path, encoding="utf-8") as fh:
-        return Config.from_dict(yaml.safe_load(fh) or {})
+        raw = yaml.safe_load(fh) or {}
+    for overlay in overlays:
+        with open(overlay, encoding="utf-8") as fh:
+            raw = deep_merge(raw, yaml.safe_load(fh) or {})
+    return Config.from_dict(raw)

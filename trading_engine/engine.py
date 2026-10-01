@@ -20,7 +20,7 @@ import numpy as np
 from trading_engine.alerts.alerts import Alert, AlertEngine
 from trading_engine.allocation.allocator import RiskAllocator
 from trading_engine.allocation.baseline import BaselineAllocator
-from trading_engine.allocation.constraints import ConstraintEngine
+from trading_engine.allocation.constraints import ConstraintEngine, fit_gross_after_freeze
 from trading_engine.allocation.drift import DriftMonitor, DriftReport
 from trading_engine.allocation.types import TargetAllocation
 from trading_engine.config import Config, resolve_path
@@ -73,6 +73,7 @@ from trading_engine.data.alpaca_history import AlpacaHistoricalClient
 from trading_engine.data.events import CalendarEvent, OrderUpdateEvent, PortfolioEvent
 from trading_engine.data.events import FxEvent, TaxLedgerEvent
 from trading_engine.tax.fx import FxRates, fetch_ecb_rates
+from trading_engine.backtest.dataset import BarDatasetFeed, fx_path as dataset_fx_path
 from trading_engine.data.calendar import MarketCalendar
 from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import portfolio_vol
@@ -344,6 +345,10 @@ class Engine:
             if not feed_cfg.replay_path:
                 raise ValueError("feed.replay_path is required for the replay provider")
             return ReplayFeed(feed_cfg.replay_path, max_events=self.config.engine.max_events)
+        if feed_cfg.provider == "dataset":
+            if not feed_cfg.dataset_path:
+                raise ValueError("feed.dataset_path is required for the dataset provider")
+            return BarDatasetFeed(resolve_path(feed_cfg.dataset_path), max_events=self.config.engine.max_events)
         if feed_cfg.provider != "simulated":
             raise ValueError(f"unknown feed provider {feed_cfg.provider!r}")
         initial = {
@@ -691,6 +696,8 @@ class Engine:
             return None
         if provider == "alpaca":
             return "alpaca"
+        if provider == "dataset":         # backtest sur données réelles : vraies séances
+            return "rules"
         return "rules" if mode == "on" else None
 
     async def _bootstrap(self, now: datetime) -> None:
@@ -715,6 +722,8 @@ class Engine:
             return None
         provider = self.config.fx.provider
         if provider == "auto":
+            if self.config.feed.provider == "dataset" and self._dataset_fx_path().exists():
+                return "file"             # taux BCE téléchargés avec le dataset
             return "ecb" if self.config.feed.provider == "alpaca" else "fixed"
         return None if provider == "off" else provider
 
@@ -737,10 +746,16 @@ class Engine:
                 self.alerts.append(Alert("FX_FALLBACK", None, now,
                                          f"taux BCE indisponibles : {quote}/{base} fixe {cfg.fixed_rate} utilisé",
                                          "warning"))
+        if self._fx_source() == "file":
+            with open(self._dataset_fx_path(), encoding="utf-8") as fh:
+                rates = FxRates.from_payload(json.load(fh))
         if rates is None:
             rates = FxRates.fixed(base, quote, cfg.fixed_rate, now.date() - timedelta(days=cfg.history_days))
         self._injected.append(FxEvent(timestamp=now, received_at=now, symbol=None,
                                       source=f"fx_{rates.source}", payload=rates.to_payload()))
+
+    def _dataset_fx_path(self):
+        return dataset_fx_path(resolve_path(self.config.feed.dataset_path or "dataset"))
 
     def _on_fx(self, event: FxEvent) -> None:
         self.fx = FxRates.from_payload(event.payload)
@@ -997,6 +1012,16 @@ class Engine:
                 safe = cur if sym in status.frozen_symbols else cur + factor * (weights[sym] - cur)
                 attribution.setdefault(sym, {})["safety"] = safe - weights[sym]
                 weights[sym] = safe
+            # Un symbole gelé au-dessus de sa cible ne libère pas son poids :
+            # les autres ne doivent pas faire dépasser l'exposition maximale.
+            c = self.config.allocation.constraints
+            fitted = fit_gross_after_freeze(weights, current, status.frozen_symbols,
+                                            min(c.max_gross, 1.0 - c.min_cash))
+            for sym, w in fitted.items():
+                if w != weights[sym]:
+                    attribution.setdefault(sym, {})["safety"] = \
+                        attribution.get(sym, {}).get("safety", 0.0) + w - weights[sym]
+                    weights[sym] = w
 
         # Hard controls : veto final, indépendant des modèles.
         verdict = self.hard_controls.validate_targets(weights)

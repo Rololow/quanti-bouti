@@ -74,9 +74,8 @@ def _forward_backward(X: np.ndarray, params: HMMParams):
     gamma = alpha * beta
     gamma /= gamma.sum(axis=1, keepdims=True)
 
-    xi = np.zeros((K, K))
-    for t in range(T - 1):
-        xi += np.outer(alpha[t], B[t + 1] * beta[t + 1]) * A / scale[t + 1]
+    # xi = Σ_t alpha_t ⊗ (B_{t+1} β_{t+1} / c_{t+1}) ∘ A, en un produit matriciel
+    xi = (alpha[:-1].T @ (B[1:] * beta[1:] / scale[1:, None])) * A
 
     step_ll = np.log(scale) + shift[:, 0]     # log p(x_t | x_{1:t-1})
     return gamma, xi, alpha, float(step_ll.sum()), step_ll

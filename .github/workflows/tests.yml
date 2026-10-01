@@ -28,3 +28,7 @@ jobs:
         run: python -m pytest -q -p no:cacheprovider
       - name: Simulation de bout en bout
         run: python -m trading_engine.main --quiet
+      - name: Mini-backtest (processus parallèles)
+        run: |
+          python -m trading_engine.backtest synthetic --start 2025-01-02 --end 2025-03-31 --out data/backtest/ci.jsonl
+          python -m trading_engine.backtest run --data data/backtest/ci.jsonl --eval-start 2025-03-01 --grid decision.holding_period=60d,240d --variants sans_modeles --workers 2 --out data/backtest/ci_report.json

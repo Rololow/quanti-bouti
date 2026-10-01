@@ -18,7 +18,7 @@ courante et la cible sont réalisables, le pas partiel de l'étape 5 l'est aussi
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Iterable, Mapping
 
 import numpy as np
 
@@ -107,3 +107,40 @@ class ConstraintEngine:
         weights = {s: float(v) for s, v in zip(symbols, w)}
         adjustments = {s: float(v - r) for s, v, r in zip(symbols, w, requested)}
         return ConstrainedTarget(weights, adjustments, tuple(binding))
+
+
+def fit_gross_after_freeze(
+    weights: Mapping[str, float],
+    current: Mapping[str, float],
+    frozen: Iterable[str],
+    gross_cap: float,
+) -> dict[str, float]:
+    """Respecte `sum |w| <= gross_cap` quand des symboles sont gelés à leur
+    poids courant (Safety DEGRADED) : les autres ne font qu'une partie de leur
+    chemin vers la cible. Si le portefeuille courant dépasse déjà la limite,
+    les symboles non gelés sont réduits proportionnellement.
+    """
+    frozen = set(frozen)
+    out = dict(weights)
+    if sum(abs(v) for v in out.values()) <= gross_cap + 1e-12:
+        return out
+    movable = [s for s in out if s not in frozen]
+
+    def blended(k: float) -> dict[str, float]:
+        return {s: (current.get(s, 0.0) + k * (out[s] - current.get(s, 0.0)) if s in movable else out[s])
+                for s in out}
+
+    def gross(w: Mapping[str, float]) -> float:
+        return sum(abs(v) for v in w.values())
+
+    if gross(blended(0.0)) <= gross_cap:
+        lo, hi = 0.0, 1.0                     # plus grande fraction du chemin qui respecte la limite
+        for _ in range(50):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if gross(blended(mid)) <= gross_cap else (lo, mid)
+        return blended(lo)
+    base = blended(0.0)
+    fixed = sum(abs(base[s]) for s in base if s not in movable)
+    free = sum(abs(base[s]) for s in movable)
+    scale = max(0.0, gross_cap - fixed) / free if free > 0 else 0.0
+    return {s: base[s] * scale if s in movable else base[s] for s in base}
