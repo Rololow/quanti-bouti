@@ -95,6 +95,24 @@ class BaselineConfig:
     max_weight: float = 0.40
 
 
+@dataclass(frozen=True)
+class TrendConfig:
+    """Filtre de tendance (allocation/trend.py) : poids × part des horizons
+    haussiers. `redistribute` : le risque retiré est redonné aux actifs en
+    tendance (jusqu'à la vol cible et au plafond brut) au lieu d'aller en cash."""
+    enabled: bool = False
+    timeframe: str = "1d"
+    horizons: tuple[int, ...] = (21, 63, 126, 252)
+    floor: float = 0.0
+    redistribute: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.horizons or any(int(h) < 1 for h in self.horizons):
+            raise ValueError("allocation.trend.horizons must be >= 1")
+        if not 0 <= self.floor <= 1:
+            raise ValueError("allocation.trend.floor must be in [0, 1]")
+
+
 ALLOCATION_METHODS = ("static", "baseline", "risk_parity", "hrp", "signal", "class_parity")
 
 
@@ -115,6 +133,10 @@ class AllocationConfig:
     # proportion de la marge restante avant ce drawdown (ex. 0.15) ; None = aucun.
     drawdown_control: float | None = None
     drawdown_min_scale: float = 0.0
+    # Plus haut de référence du contrôle du drawdown : jours calendaires
+    # glissants (ex. 365) ; None = plus haut historique (peut bloquer en cash).
+    drawdown_window_days: int | None = None
+    trend: TrendConfig = field(default_factory=TrendConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     constraints: Constraints = field(default_factory=Constraints)
 
@@ -129,6 +151,8 @@ class AllocationConfig:
             raise ValueError("allocation.drawdown_control must be in (0, 1)")
         if not 0 <= self.drawdown_min_scale <= 1:
             raise ValueError("allocation.drawdown_min_scale must be in [0, 1]")
+        if self.drawdown_window_days is not None and self.drawdown_window_days < 1:
+            raise ValueError("allocation.drawdown_window_days must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -377,6 +401,10 @@ class Config:
         alloc = dict(raw.get("allocation") or {})
         alloc_baseline = BaselineConfig(**(alloc.pop("baseline", None) or {}))
         alloc_constraints = Constraints(**(alloc.pop("constraints", None) or {}))
+        trend = dict(alloc.pop("trend", None) or {})
+        if "horizons" in trend:
+            trend["horizons"] = tuple(int(h) for h in trend["horizons"])
+        alloc_trend = TrendConfig(**trend)
         risk = dict(raw.get("risk") or {})
         risk_limits = RiskLimits(**(risk.pop("limits", None) or {}))
         safety = dict(raw.get("safety") or {})
@@ -438,7 +466,7 @@ class Config:
                 },
             ),
             allocation=AllocationConfig(
-                baseline=alloc_baseline, constraints=alloc_constraints, **alloc
+                baseline=alloc_baseline, constraints=alloc_constraints, trend=alloc_trend, **alloc
             ),
             risk=RiskConfig(limits=risk_limits, **risk),
             integrity=IntegrityConfig(**(raw.get("integrity") or {})),

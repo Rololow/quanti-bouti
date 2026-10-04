@@ -20,7 +20,7 @@ on:
         default: "allocation.target_vol=0.08,0.12,0.16"
       variants:
         description: "Variantes du moteur"
-        default: "lev15,lev30,lev15_actions,lev30_actions"
+        default: "lev15_ancien,lev15,lev15_tendance,lev15_tendance_redist,lev30,lev30_tendance,lev30_tendance_redist"
       overlays:
         description: "Surcouches supplémentaires (séparées par des espaces)"
         default: "config/leverage.yaml"
@@ -39,6 +39,7 @@ on:
       - "config/tax_ucits.yaml"
       - "config/leverage.yaml"
       - "trading_engine/portfolio/financing.py"
+      - "trading_engine/allocation/trend.py"
 
 permissions:
   contents: read
@@ -55,7 +56,7 @@ jobs:
       START: ${{ inputs.start || '2006-03-01' }}
       SYMBOLS: ${{ inputs.symbols || '' }}
       GRID: ${{ inputs.grid || 'allocation.target_vol=0.08,0.12,0.16' }}
-      VARIANTS: ${{ inputs.variants || 'lev15,lev30,lev15_actions,lev30_actions' }}
+      VARIANTS: ${{ inputs.variants || 'lev15_ancien,lev15,lev15_tendance,lev15_tendance_redist,lev30,lev30_tendance,lev30_tendance_redist' }}
       EXTRA: ${{ inputs.overlays || 'config/leverage.yaml' }}
       SCENARIOS: ${{ inputs.scenarios || 'ucits' }}
       # Univers : 8 ETF, 3 classes d'actifs (DBC coté depuis février 2006).

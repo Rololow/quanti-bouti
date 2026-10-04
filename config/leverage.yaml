@@ -4,8 +4,14 @@
 # (≈ financement implicite des futures sur indices / Treasuries ; un prêt sur
 # marge chez un broker coûte nettement plus : ajuster financing.borrow_spread).
 # Le contrôle du drawdown (Grossman-Zhou) réduit l'exposition à mesure que la
-# perte depuis le plus haut approche la limite ; le Safety Engine arrête tout à
-# la limite (risk.limits.max_drawdown).
+# perte depuis le plus haut **des 12 derniers mois** approche la limite (le
+# plus haut historique enfermait le portefeuille en cash après une perte).
+#
+# Avec levier, arrêter le moteur sur une perte (HALTED) fige les positions
+# levées au pire moment : la réponse aux pertes est la réduction d'exposition
+# (contrôle du drawdown, désendettement forcé si l'exposition dérive au-delà du
+# plafond), pas l'arrêt. Le Safety Engine garde l'arrêt pour les anomalies
+# (données, modèles, perte journalière > 10 %, invariants larges).
 #
 # À utiliser avec config/universe_wide.yaml (classes d'actifs).
 
@@ -13,6 +19,14 @@ allocation:
   method: class_parity
   target_vol: 0.12
   drawdown_control: 0.15
+  drawdown_window_days: 365
+  # Filtre de tendance (désactivé ici ; variantes *_tendance du backtest).
+  trend:
+    enabled: false
+    timeframe: 1d
+    horizons: [21, 63, 126, 252]
+    floor: 0.0
+    redistribute: false
   constraints:
     max_gross: 2.0
     max_weight: 0.80
@@ -31,3 +45,14 @@ risk:
     max_gross_leverage: 2.05
     max_weight: 0.85
     max_drawdown: 0.15
+
+safety:
+  halt_on_breaches: []
+  max_daily_loss: 0.10
+  # Dérive des prix avec levier : l'exposition peut dépasser le plafond entre
+  # deux décisions ; le désendettement forcé la ramène (decision.delever_tolerance).
+  invariant_gross_tolerance: 0.25
+  invariant_cash_tolerance: 0.25
+
+decision:
+  delever_tolerance: 0.05

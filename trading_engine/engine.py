@@ -20,6 +20,7 @@ import numpy as np
 from trading_engine.alerts.alerts import Alert, AlertEngine
 from trading_engine.allocation.allocator import RiskAllocator
 from trading_engine.allocation.baseline import BaselineAllocator
+from trading_engine.allocation.trend import TrendFilter, apply_trend
 from trading_engine.allocation.constraints import ConstraintEngine, fit_gross_after_freeze, gross_cap_of
 from trading_engine.allocation.drift import DriftMonitor, DriftReport
 from trading_engine.allocation.types import TargetAllocation
@@ -77,7 +78,7 @@ from trading_engine.tax.fx import FxRates, fetch_ecb_rates
 from trading_engine.backtest.dataset import BarDatasetFeed, fx_path as dataset_fx_path, rates_path as dataset_rates_path
 from trading_engine.data.calendar import NY, MarketCalendar
 from trading_engine.execution.volume import VolumeTracker
-from trading_engine.risk.portfolio_risk import portfolio_vol
+from trading_engine.risk.portfolio_risk import RollingDrawdown, portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
 from trading_engine.robustness.stress import StressReport, stress_test
 from trading_engine.safety.invariants import InvariantMonitor
@@ -203,6 +204,15 @@ class Engine:
         self._bootstrapped = False
         self._last_session_decision: date | None = None
         self.rates: RateSeries | None = None
+        alloc = config.allocation
+        self.rolling_drawdown = (None if alloc.drawdown_window_days is None
+                                 else RollingDrawdown(alloc.drawdown_window_days))
+        self.trend: TrendFilter | None = None
+        if alloc.trend.enabled:
+            if alloc.trend.timeframe not in config.bar_timeframes:
+                raise ValueError(f"allocation.trend.timeframe {alloc.trend.timeframe!r} "
+                                 f"is not in bars.timeframes {config.bar_timeframes}")
+            self.trend = TrendFilter(alloc.trend.horizons, alloc.trend.floor)
         self._accrued_until: date | None = None
         self.interest_earned = 0.0           # devise du portefeuille
         self.financing_cost = 0.0
@@ -413,6 +423,8 @@ class Engine:
         self.risk.on_price(event.symbol, event.price, event.timestamp)
         value = self.portfolio.total_value()
         self.risk.on_value(value, event.timestamp)
+        if self.rolling_drawdown is not None:
+            self.rolling_drawdown.update(value, event.timestamp.astimezone(NY).date())
         self.safety.on_value(value, event.timestamp)
         self.features.on_trade(event)
         # L'horloge de marché (timestamp des trades) clôture les barres de
@@ -446,6 +458,9 @@ class Engine:
         self.models.on_bar(event)
         if event.timeframe == self.volume.timeframe and not event.payload.get("correction"):
             self.volume.update(event.symbol, event.volume)
+        if self.trend is not None and event.timeframe == self.config.allocation.trend.timeframe \
+                and not event.payload.get("correction"):
+            self.trend.on_close(event.symbol, event.close)
         if event.timeframe == self.config.allocation.rebalance_timeframe:
             self._interval_due = True
 
@@ -1001,6 +1016,7 @@ class Engine:
             daily_vols=self._daily_vols(symbols),
             adv={s: self.volume.adv(s) for s in symbols},
             execution_confidence=self.execution_feedback.execution_confidence,
+            max_gross=gross_cap_of(self.config.allocation.constraints),
         )
 
     def decide(self, status: SafetyStatus) -> Decision:
@@ -1104,12 +1120,37 @@ class Engine:
         limit = self.config.allocation.drawdown_control
         if not limit:
             return 1.0
-        dd = -min(0.0, self.risk.portfolio_drawdown.drawdown)
+        tracker = self.rolling_drawdown or self.risk.portfolio_drawdown
+        dd = -min(0.0, tracker.drawdown)
         if dd >= limit:
             scale = 0.0
         else:
             scale = (1.0 - (1.0 - limit) / (1.0 - dd)) / limit
         return max(self.config.allocation.drawdown_min_scale, min(1.0, scale))
+
+    def _apply_trend(self, requested: dict[str, float], attribution: dict, symbols: list[str],
+                     cov: np.ndarray | None) -> None:
+        """Filtre de tendance : poids × score de tendance ; avec `redistribute`,
+        le portefeuille filtré est remis à l'échelle (vol cible, plafond brut)."""
+        cash_rate = 0.0
+        if self.rates is not None and self.features.now is not None:
+            cash_rate = self.rates.rate(self.features.now.astimezone(NY).date())
+        mult = self.trend.multipliers(list(requested), cash_rate)
+        filtered = apply_trend(requested, mult)
+        tc = self.config.allocation.trend
+        if tc.redistribute and cov is not None:
+            w = np.array([filtered.get(s, 0.0) for s in symbols])
+            vol = portfolio_vol(w, cov)
+            gross = float(np.abs(w).sum())
+            cap = gross_cap_of(self.config.allocation.constraints)
+            if vol > 0 and gross > 0:
+                k = min(self.config.allocation.target_vol / vol, cap / gross)
+                if k > 1.0:
+                    filtered = {s: v * k for s, v in filtered.items()}
+        for sym, w in filtered.items():
+            if w != requested[sym]:
+                attribution.setdefault(sym, {})["trend"] = w - requested[sym]
+                requested[sym] = w
 
     def _reallocate(self, status: SafetyStatus) -> None:
         symbols = self.universe()
@@ -1124,6 +1165,8 @@ class Engine:
             requested, attribution, _ = self.allocator.allocate(symbols, cov, signals, None)
         else:
             return  # pas encore de covariance : on garde la cible actuelle
+        if self.trend is not None:
+            self._apply_trend(requested, attribution, symbols, cov)
         scale = self._drawdown_scale()
         if scale < 1.0:
             for sym in requested:

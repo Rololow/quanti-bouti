@@ -66,6 +66,28 @@ VARIANTS: dict[str, dict[str, Any]] = {
               "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15},
     "lev30": {"allocation.method": "class_parity", "decision.include_alpha": False,
               "allocation.drawdown_control": 0.30, "risk.limits.max_drawdown": 0.30},
+    # Étape 1 : comportement d'avant (plus haut historique, arrêt sur perte et
+    # sur dérive du levier) pour mesurer l'apport des corrections.
+    "lev15_ancien": {"allocation.method": "class_parity", "decision.include_alpha": False,
+                     "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15,
+                     "allocation.drawdown_window_days": None,
+                     "safety.halt_on_breaches": ("DRAWDOWN", "LEVERAGE"), "safety.max_daily_loss": 0.03,
+                     "safety.invariant_gross_tolerance": 0.02, "safety.invariant_cash_tolerance": 0.01,
+                     "decision.delever_tolerance": 1e9},
+    # Étape 2 : filtre de tendance (1, 3, 6, 12 mois) ; risque retiré en cash
+    # ou redonné aux actifs en tendance (jusqu'à la vol cible).
+    "lev15_tendance": {"allocation.method": "class_parity", "decision.include_alpha": False,
+                       "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15,
+                       "allocation.trend.enabled": True},
+    "lev15_tendance_redist": {"allocation.method": "class_parity", "decision.include_alpha": False,
+                              "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15,
+                              "allocation.trend.enabled": True, "allocation.trend.redistribute": True},
+    "lev30_tendance": {"allocation.method": "class_parity", "decision.include_alpha": False,
+                       "allocation.drawdown_control": 0.30, "risk.limits.max_drawdown": 0.30,
+                       "allocation.trend.enabled": True},
+    "lev30_tendance_redist": {"allocation.method": "class_parity", "decision.include_alpha": False,
+                              "allocation.drawdown_control": 0.30, "risk.limits.max_drawdown": 0.30,
+                              "allocation.trend.enabled": True, "allocation.trend.redistribute": True},
     "lev15_actions": {"allocation.method": "class_parity", "decision.include_alpha": False,
                       "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15,
                       "allocation.class_budgets": {"equity": 0.5, "bonds": 0.25, "commodities": 0.25}},
@@ -82,6 +104,11 @@ VARIANT_LABELS = {
     "lev30": "Levier, limite -30 %, classes égales",
     "lev15_actions": "Levier, limite -15 %, 50 % du risque en actions",
     "lev30_actions": "Levier, limite -30 %, 50 % du risque en actions",
+    "lev15_ancien": "Levier -15 %, version précédente (plus haut historique, arrêts)",
+    "lev15_tendance": "Levier -15 % + filtre de tendance (vers cash)",
+    "lev15_tendance_redist": "Levier -15 % + tendance, risque redistribué",
+    "lev30_tendance": "Levier -30 % + filtre de tendance (vers cash)",
+    "lev30_tendance_redist": "Levier -30 % + tendance, risque redistribué",
 }
 # Références à poids fixes, rebalancées chaque mois (calculées si leurs symboles
 # sont dans le dataset).
@@ -112,6 +139,10 @@ def _replace_path(obj: Any, parts: Sequence[str], value: Any) -> Any:
     current = getattr(obj, head)
     if len(parts) > 1:
         return dataclasses.replace(obj, **{head: _replace_path(current, parts[1:], value)})
+    if value is None or isinstance(current, tuple):
+        if isinstance(value, str):
+            value = tuple(v for v in value.split("+") if v)        # grille : a+b+c
+        return dataclasses.replace(obj, **{head: value if value is None else tuple(value)})
     if isinstance(current, bool):
         value = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes", "oui")
     elif isinstance(current, (int, float)) and not isinstance(value, (int, float)):
@@ -221,8 +252,13 @@ def _run_job(job: dict) -> StrategyResult:
 
 def walk_forward(runs: Sequence[StrategyResult], eval_start: date, eval_end: date,
                  default: StrategyResult, *, min_days: int = 60,
-                 max_drawdown: float | None = None) -> tuple[StrategyResult, list[dict]]:
+                 max_drawdown: float | None = None,
+                 lookback_years: int | None = None) -> tuple[StrategyResult, list[dict]]:
     """Choix annuel sur le passé ; série hors échantillon recollée.
+
+    `lookback_years` : le passé jugé est limité aux N dernières années (sinon
+    toute l'histoire depuis `eval_start`) ; une ancienne perte au-delà de la
+    limite n'écarte plus un paramètre pour toujours.
 
     Sans `max_drawdown` : meilleur Sharpe passé. Avec : meilleur rendement passé
     parmi les paramètres dont le drawdown passé est resté dans la limite (à
@@ -236,7 +272,10 @@ def walk_forward(runs: Sequence[StrategyResult], eval_start: date, eval_end: dat
         best, best_sharpe, reason = default, None, "défaut (pas assez d'historique)"
         candidates = []
         for r in runs:
-            past = metrics.window(r.equity, eval_start, fold_start - timedelta(days=1))
+            since = eval_start
+            if lookback_years is not None:
+                since = max(eval_start, fold_start - timedelta(days=round(365.25 * lookback_years)))
+            past = metrics.window(r.equity, since, fold_start - timedelta(days=1))
             if len(past) >= min_days:
                 candidates.append((r, metrics.compute(past)))
         if max_drawdown is None:
@@ -316,6 +355,7 @@ def run_backtest(
     cost_stress: float = 2.0,
     bootstrap_samples: int = 2000,
     max_drawdown: float | None = None,
+    wf_lookback_years: int | None = 3,
 ) -> dict:
     dataset = resolve_path(dataset)
     cfg = with_params(load_config(config, tuple(overlays)), {"feed.dataset_path": str(dataset)})
@@ -385,7 +425,8 @@ def run_backtest(
         if len(runs) > 1:
             # Sélection : sous la limite de drawdown de la variante si elle en a une.
             limit = max_drawdown or VARIANTS[v].get("allocation.drawdown_control")
-            wf, folds = walk_forward(runs, eval_start, eval_end, runs[default_index], max_drawdown=limit)
+            wf, folds = walk_forward(runs, eval_start, eval_end, runs[default_index], max_drawdown=limit,
+                                     lookback_years=wf_lookback_years)
             wf.name = f"{VARIANT_LABELS[v]} — walk-forward (hors échantillon)"
             r = row(wf, eval_start, eval_end, fx)
             r["metrics"]["turnover"] = None             # dépend des runs choisis, cf. folds

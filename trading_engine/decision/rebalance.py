@@ -71,6 +71,10 @@ class DecisionConfig:
     min_robustness: float = 0.3           # en dessous : cible jugée non fiable
     min_data_score: float = 0.9
     include_alpha: bool = True
+    # Exposition brute courante > plafond + cette tolérance (dérive des prix
+    # avec levier) : désendettement forcé vers la cible, sans bande ni calcul
+    # coût/bénéfice (le risque de marge n'est pas dans ce calcul).
+    delever_tolerance: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -159,6 +163,7 @@ class DecisionContext:
     daily_vols: Mapping[str, float] = field(default_factory=dict)
     adv: Mapping[str, float | None] = field(default_factory=dict)
     execution_confidence: float | None = None
+    max_gross: float | None = None        # plafond d'exposition brute (désendettement forcé)
 
 
 class DecisionEngine:
@@ -253,6 +258,10 @@ class DecisionEngine:
         w_c = np.array([ctx.current.get(s, 0.0) for s in symbols])
         w_t_full = np.array([ctx.target.get(s, ctx.current.get(s, 0.0)) for s in symbols])
 
+        gross_c = float(np.abs(w_c).sum())
+        delever = (ctx.max_gross is not None and gross_c > ctx.max_gross + cfg.delever_tolerance
+                   and float(np.abs(w_t_full).sum()) < gross_c)
+
         # Symboles exclus : ils restent à leur poids courant.
         excluded: dict[str, str] = {}
         for i, s in enumerate(symbols):
@@ -260,6 +269,8 @@ class DecisionEngine:
                 excluded[s] = "gelé par le Safety Engine"
             elif ctx.data_scores.get(s, 1.0) < cfg.min_data_score:
                 excluded[s] = f"qualité des données {ctx.data_scores[s]:.2f}"
+            elif delever:
+                continue
             elif abs(w_t_full[i] - w_c[i]) < cfg.no_trade_band:
                 excluded[s] = f"écart {w_t_full[i] - w_c[i]:+.1%} dans la bande de non-trading"
         movable = np.array([s not in excluded for s in symbols])
@@ -295,7 +306,7 @@ class DecisionEngine:
         # --- évaluation de chaque fraction
         robustness = 1.0 if ctx.robustness is None else ctx.robustness
         best = None
-        for f in sorted(set(cfg.fractions)):
+        for f in ((1.0,) if delever else sorted(set(cfg.fractions))):
             w_f = w_c + f * (w_t - w_c)
             dw = w_f - w_c
             risk_benefit = scale * (te2_now - self._te2(w_f, w_t_full, ctx.cov))
@@ -322,7 +333,9 @@ class DecisionEngine:
         gross_benefit = max(risk_benefit, 0.0) + max(alpha, 0.0)
         urgency = max(alpha, 0.0) / gross_benefit if gross_benefit > 0 else 0.0
         reasons = self._reasons(per_symbol, risk_benefit, alpha, costs, sigma, net, f, tracking_error)
-        action = UREBALANCE if net > cfg.min_net_benefit else UDONOTHING
+        action = UREBALANCE if net > cfg.min_net_benefit or delever else UDONOTHING
+        if delever:
+            reasons.insert(0, f"désendettement forcé : exposition brute {gross_c:.2f} > plafond {ctx.max_gross:.2f}")
         if action == UDONOTHING:
             reasons.insert(0, "le bénéfice ne couvre pas coûts + incertitude")
             f, per_symbol = 0.0, {
