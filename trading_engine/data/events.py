@@ -29,6 +29,12 @@ class EventType(str, Enum):
     PORTFOLIO = "portfolio"
     RISK = "risk"
     DECISION = "decision"
+    ALERT = "alert"
+    NEWS_ANALYSIS = "news_analysis"
+    ORDER_UPDATE = "order_update"
+    CALENDAR = "calendar"
+    FX = "fx"
+    TAX_LEDGER = "tax_ledger"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -101,7 +107,15 @@ class BarEvent(MarketEvent):
 
 @dataclass(frozen=True, kw_only=True)
 class NewsEvent(Event):
+    """News brute. `timestamp` = publication, `received_at` = réception.
+    Une news qui cite plusieurs symboles donne un événement par symbole,
+    reliés par le même `news_id`."""
+
     headline: str = ""
+    summary: str = ""
+    url: str = ""
+    news_id: str = ""
+    provider: str = ""            # agence / éditeur (Benzinga, Reuters…)
 
     event_type = EventType.NEWS
 
@@ -110,10 +124,12 @@ class NewsEvent(Event):
 class FundamentalEvent(Event):
     """Donnée fondamentale datée (README §20) : jamais utilisable avant `available_at`."""
 
-    name: str
+    name: str                     # ex. revenue, eps, guidance_eps
     value: float
-    period: str
-    available_at: datetime
+    period: str                   # période concernée, ex. 2026Q1
+    available_at: datetime        # publication : jamais utilisable avant
+    estimate: float | None = None # consensus attendu (earnings surprise)
+    unit: str = ""
 
     event_type = EventType.FUNDAMENTAL
 
@@ -131,6 +147,27 @@ class PortfolioEvent(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class CalendarEvent(Event):
+    """Séances de marché (payload : `MarketCalendar.to_payload()`)."""
+
+    event_type = EventType.CALENDAR
+
+
+@dataclass(frozen=True, kw_only=True)
+class FxEvent(Event):
+    """Taux de change (payload : `FxRates.to_payload()`)."""
+
+    event_type = EventType.FX
+
+
+@dataclass(frozen=True, kw_only=True)
+class TaxLedgerEvent(Event):
+    """État du registre fiscal au démarrage (payload : `source`, `ledger`)."""
+
+    event_type = EventType.TAX_LEDGER
+
+
+@dataclass(frozen=True, kw_only=True)
 class RiskEvent(Event):
     event_type = EventType.RISK
 
@@ -138,3 +175,55 @@ class RiskEvent(Event):
 @dataclass(frozen=True, kw_only=True)
 class DecisionEvent(Event):
     event_type = EventType.DECISION
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewsAnalysisEvent(Event):
+    """Sortie structurée (validée) de l'IA pour une news (README §23-26).
+
+    `timestamp` = publication de la news ; `received_at` = moment où l'analyse
+    est disponible (après la latence du modèle) : elle n'est jamais utilisée
+    avant. L'analyse elle-même est dans `payload`. Enregistrée dans le
+    journal : le replay la relit sans rappeler le modèle.
+    """
+
+    news_id: str
+    headline: str = ""
+    model: str = ""
+
+    event_type = EventType.NEWS_ANALYSIS
+
+
+@dataclass(frozen=True, kw_only=True)
+class OrderUpdateEvent(Event):
+    """Mise à jour d'un ordre chez le broker (Alpaca `trade_updates`).
+
+    `update` : new | fill | partial_fill | canceled | expired | rejected | ...
+    `fill_qty` / `fill_price` : exécution de cet événement (fill, partial_fill) ;
+    `filled_qty` / `filled_avg_price` : cumul de l'ordre. Enregistrée dans le
+    journal : le replay rejoue les fills sans broker.
+    """
+
+    client_order_id: str
+    broker_order_id: str = ""
+    update: str = ""
+    side: str = ""
+    fill_qty: float = 0.0
+    fill_price: float | None = None
+    filled_qty: float = 0.0
+    filled_avg_price: float | None = None
+
+    event_type = EventType.ORDER_UPDATE
+
+    @property
+    def terminal(self) -> bool:
+        return self.update in ("fill", "canceled", "expired", "rejected", "done_for_day")
+
+
+@dataclass(frozen=True, kw_only=True)
+class AlertEvent(Event):
+    kind: str
+    severity: str = "info"            # info | warning | critical
+    message: str = ""
+
+    event_type = EventType.ALERT

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable
 
-from trading_engine.data.events import BarEvent, MarketEvent, QuoteEvent, TradeEvent
+from trading_engine.data.events import BarEvent, MarketEvent, NewsEvent, QuoteEvent, TradeEvent
 from trading_engine.data.market_feed import MarketFeed
 from trading_engine.timeutils import parse_rfc3339, utcnow
 
@@ -125,7 +125,7 @@ class AlpacaMarketFeed(MarketFeed):
         self._key_id = key_id
         self._secret_key = secret_key
         self.url = url or STREAM_URL.format(feed=data_feed)
-        self.channels = {"trades": trades, "quotes": quotes, "bars": bars}
+        self.channels: dict[str, bool] = {"trades": trades, "quotes": quotes, "bars": bars}
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
         self.handshake_timeout = handshake_timeout
@@ -246,8 +246,9 @@ class AlpacaMarketFeed(MarketFeed):
                 await self._heartbeat(ws)
                 continue
             for message in messages:
-                event = self.parse_message(message)
-                if event is not None:
+                parsed = self.parse_message(message)
+                events = parsed if isinstance(parsed, list) else ([] if parsed is None else [parsed])
+                for event in events:
                     self.status.events_emitted += 1
                     self.status.last_latency = event.received_at - event.timestamp
                     yield event
@@ -334,3 +335,47 @@ def _default_connect(url: str) -> Any:
 
     # Heartbeat géré par le feed lui-même (ping sur inactivité).
     return websockets.connect(url, ping_interval=None, max_size=2**23)
+
+
+NEWS_URL = "wss://stream.data.alpaca.markets/v1beta1/news"
+
+
+class AlpacaNewsFeed(AlpacaMarketFeed):
+    """Flux news temps réel Alpaca (même protocole, canal `news`).
+
+    Message : {"T": "n", "id", "headline", "summary", "author", "created_at",
+    "updated_at", "url", "symbols": [...], "source"}. Une news citant plusieurs
+    symboles donne un NewsEvent par symbole (même `news_id`). `symbols=["*"]`
+    s'abonne à toutes les news.
+    """
+
+    SOURCE = "alpaca_news"
+
+    def __init__(self, symbols, *, url: str | None = None, **kwargs: Any) -> None:
+        kwargs.pop("data_feed", None)
+        for channel in ("trades", "quotes", "bars"):
+            kwargs.pop(channel, None)
+        super().__init__(symbols, url=url or NEWS_URL, trades=False, quotes=False, bars=False, **kwargs)
+        self.channels = {"news": True}
+
+    def parse_message(self, message: dict[str, Any]):
+        if message.get("T") != "n":
+            return super().parse_message(message)
+        try:
+            published = parse_rfc3339(message["created_at"])
+            symbols = message.get("symbols") or []
+            return [
+                NewsEvent(
+                    timestamp=published, received_at=self._clock(), symbol=sym, source=self.SOURCE,
+                    headline=message.get("headline", ""), summary=message.get("summary", ""),
+                    url=message.get("url", ""), news_id=str(message.get("id", "")),
+                    provider=message.get("source", ""),
+                    payload={"author": message.get("author"), "symbols": tuple(symbols),
+                             "updated_at": message.get("updated_at")},
+                )
+                for sym in symbols
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            self.status.parse_errors += 1
+            logger.warning("invalid alpaca news message %r: %s", message, exc)
+            return None

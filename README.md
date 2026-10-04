@@ -14,14 +14,43 @@ pip install -e ".[dev]"
 # Lance la boucle Core sur un flux simulé (config/config.yaml)
 python -m trading_engine.main
 
+# Dashboard (lecture seule, http://127.0.0.1:8050) ; sim_speed > 0 pour le voir évoluer
+python -m trading_engine.main --dashboard --keep-open
+
+# Dashboard autonome d'une simulation ou d'un replay (un seul fichier HTML)
+python -m trading_engine.main --quiet --export-dashboard dashboard.html
+
+# Extraction des news par Claude (payant ; ANTHROPIC_API_KEY ou `ant auth login`)
+pip install -e ".[ai]"   # puis dans config.yaml : ai.provider: claude
+
 # Tests
 pytest
 ```
 
 État actuel : Phase 1 (Core), Phase 2 (Realtime), Phase 3 (Features :
 rendements, volatilité EWMA, momentum multi-horizon normalisé, mean reversion,
-VWAP, corrélations EWMA) et Phase 4 (journal d'événements, replay déterministe,
-baseline momentum + volatility targeting).
+VWAP, corrélations EWMA), Phase 4 (journal d'événements, replay déterministe,
+baseline momentum + volatility targeting) et Phase 5 (HMM de régime HF / MT / LT,
+modèle de facteurs online émettant des signaux « rendement attendu ± incertitude »,
+avec oubli, régularisation, taille minimale d'échantillon, suivi du skill et
+détection de dérive), Phase 6 (volatilité ex-ante, contributions au risque,
+concentration, drawdown, limites et alertes) et Phase 7 (risk parity, HRP,
+budgets de risque issus des signaux, volatility targeting, Constraint Engine,
+attribution de la cible, drift monitoring), Phase 8 (Data Integrity avec
+quarantaine des sauts non confirmés, Safety Engine NORMAL / DEGRADED / HALTED,
+hard controls indépendants des modèles), Phase 9 (MODEL_DEGRADED des HMM,
+fiabilité des prédicteurs par régime, ensemble pondéré par la corrélation des
+erreurs, stress tests de la cible, tests de perturbation), Phase 12 (Decision
+Engine UREBALANCE / UDONOTHING en unités économiques avec coûts et taxes,
+rebalancement partiel, hystérésis, raisons, alertes, journal des décisions),
+Phase 13 (exécution : coûts et impact, fill model, pricer, optimiseur
+d'ordres, paper broker, boucle de feedback et confiance d'exécution), Phase 10
+(fondamentaux point-in-time, earnings, guidance, SEC EDGAR, news Alpaca
+dédupliquées en événements), Phase 11 (extraction structurée des news par
+Claude, validation, dédoublonnage sémantique, qualité des sources, score
+événementiel, IMPORTANT_NEWS), Phase 14 (dashboard temps réel en lecture
+seule et export HTML autonome) et profils fiscaux par pays (TOML, Belgique
+fournie).
 
 Par défaut le moteur tourne sur un flux simulé déterministe. Pour le flux
 Alpaca temps réel :
@@ -43,12 +72,168 @@ feed:
   provider: replay                 # puis rejoue le journal
   replay_path: data/events.jsonl
 allocation:
-  method: baseline                 # ou static : interrupteur d'ablation
+  method: signal                   # static | baseline | risk_parity | hrp | signal
 ```
 
 Le plan Alpaca gratuit donne accès au flux `iex`. Le client gère la
 reconnexion (backoff exponentiel), le heartbeat (ping WebSocket en cas
 d'inactivité) et horodate chaque événement (heure bourse + heure de réception).
+
+### Backtest sur données réelles
+
+Avant de faire confiance au moteur, il faut savoir s'il bat des stratégies
+simples **après coûts et TOB**. Le backtest rejoue des années de barres 30 min
+Alpaca dans le moteur **inchangé** (chaque barre devient des trades
+synthétiques ouverture → plus bas/haut → clôture) et le compare à :
+
+- buy & hold équipondéré ;
+- risk parity mensuelle (poids ∝ 1/volatilité) ;
+- le moteur **sans modèles** (risk parity + Decision Engine, sans alpha),
+  qui isole ce qu'apportent les modèles.
+
+```bash
+export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...
+# 1. données (une fois) : barres des séances régulières + taux BCE
+python -m trading_engine.backtest download --start 2018-01-01 --end 2026-09-30
+# 2. backtest (une exécution par variante et par valeur de la grille, en parallèle)
+python -m trading_engine.backtest run
+# sans clé, pour vérifier la chaîne (données synthétiques, aucun edge)
+python -m trading_engine.backtest synthetic --start 2022-01-01 --end 2024-12-31
+python -m trading_engine.backtest run --data data/backtest/synthetic_30m.jsonl
+```
+
+La config du backtest est `config/config.yaml` + la surcouche
+`config/backtest.yaml` (réglages 5m remplacés par 30m/1h, départ en cash).
+Le rapport (`data/backtest/report.json` et `.md`) donne, sur la fenêtre
+d'évaluation (par défaut tout sauf la première année, qui sert de
+démarrage) : CAGR, volatilité, Sharpe, drawdown maximal, en USD et en EUR
+(cours BCE du jour), turnover, TOB payée, et le nombre d'arrêts du Safety
+Engine (le runner relance après une séance, comme un opérateur).
+
+**Walk-forward** : le paramètre testé par défaut est l'horizon de détention
+(`decision.holding_period` : 20, 60, 120 jours ; le bénéfice d'un
+rebalancement est proportionnel à aversion au risque × horizon). Chaque année
+d'évaluation utilise la valeur qui avait le meilleur Sharpe sur les années
+précédentes ; la ligne « walk-forward » est le seul résultat hors
+échantillon. Autres grilles : `--grid decision.risk_aversion=5,20 --grid
+decision.holding_period=60d,120d`.
+
+Limites : chemin intra-barre approximé ; pas de cotations historiques
+(spread par défaut) ; prix ajustés des dividendes mais précompte non déduit ;
+impôt sur les plus-values non déduit des séries ; références exécutées à la
+clôture avec fractions d'actions (hypothèse favorable aux références).
+
+### Tester avec un compte Alpaca **paper**
+
+Le mode `alpaca_paper` envoie les ordres validés par les hard controls au
+compte **paper** d'Alpaca (argent fictif, fills réels côté Alpaca). Le code
+n'accepte que l'hôte `paper-api.alpaca.markets` : aucun chemin vers un compte
+réel n'existe.
+
+```yaml
+# config/config.yaml
+feed:
+  provider: alpaca
+engine:
+  max_events: null
+storage:
+  event_log: data/events.jsonl     # recommandé : la session pourra être rejouée
+execution:
+  mode: alpaca_paper
+  sync_portfolio: true             # cash et positions lus sur le compte au démarrage
+  reconcile: true                  # rapprochement moteur / compte à chaque intervalle
+warmup:
+  enabled: true                    # historique chargé au démarrage
+```
+
+```bash
+export APCA_API_KEY_ID=...        # clés du compte PAPER
+export APCA_API_SECRET_KEY=...
+python -m trading_engine.main --dashboard
+```
+
+Au démarrage :
+
+1. **synchronisation** : cash et positions du compte paper deviennent l'état du
+   moteur (lots fiscaux reconstruits au prix moyen du broker) ; compte bloqué
+   ou non `ACTIVE` -> HALTED ;
+2. **warm-up** : barres historiques (REST `data.alpaca.markets`, 5 j en 5m,
+   45 j en 1h, 400 j en 1d par défaut) ; elles initialisent features,
+   covariance, régimes et volumes sans déclencher de décision ;
+3. **temps réel** : flux de marché + flux `trade_updates` du compte. Chaque
+   décision UREBALANCE remplace les ordres en cours **du moteur** (identifiant
+   `qb-<décision>-<symbole>` ; les autres ordres du compte ne sont jamais
+   touchés) par des ordres limite. Les fills arrivent par `trade_updates` et
+   mettent à jour positions, taxes et boucle de feedback. Ordre expiré ->
+   annulé ; sans nouvelles 5 min plus tard -> oublié, le rapprochement corrige.
+
+Le broker fait foi : à chaque intervalle sans ordre en cours, le compte est relu ;
+un écart déclenche une alerte `RECONCILIATION` et l'état du broker est adopté.
+La TOB n'est pas prélevée par Alpaca (broker étranger : à déclarer soi-même) ;
+elle est comptée à part (`taxes dues hors broker`).
+
+Tout ce qui vient d'Alpaca (historique, état du compte, mises à jour d'ordres)
+est enregistré dans le journal : `feed.provider: replay` avec
+`execution.mode: alpaca_paper` rejoue la session à l'identique, sans broker.
+
+### Devises et registre fiscal
+
+Le compte Alpaca est en USD, l'impôt belge en EUR. Chaque opération est
+convertie au **cours de référence BCE** du jour (dernier cours publié ce
+jour-là ou avant) : TOB et plafonds en EUR, lots fiscaux en EUR, plus-values
+calculées en EUR (l'effet de change fait partie de la plus-value taxable).
+Les estimations fiscales utilisées par la décision restent en USD. En
+simulation, un taux fixe (`fx.fixed_rate`) est utilisé ; si la BCE est
+injoignable en live, ce taux sert de repli avec une alerte `FX_FALLBACK`.
+
+En `alpaca_paper`, le **registre fiscal** (`tax.ledger_path`, par défaut
+`data/tax_ledger.json`, jamais commité) garde d'un démarrage à l'autre les
+lots avec leur vraie date et leur coût en EUR, les plus-values réalisées
+(donc l'exonération reportée) et chaque ligne de TOB à déclarer. Il est
+écrit à chaque fill, de façon atomique. À la synchronisation, les lots du
+registre sont gardés ; seuls les écarts avec le compte sont corrigés, avec
+une alerte `TAX_LEDGER`. Taux et registre sont journalisés : le replay
+repart des mêmes valeurs.
+
+### Invariants et tests de chaos
+
+Les contrôles amont (contraintes, hard controls, dimensionnement des ordres)
+doivent garantir certaines propriétés ; un **moniteur d'invariants** vérifie
+quand même l'état réel après chaque intervalle et chaque événement du compte
+broker : valeurs finies, cash pas négatif (au-delà de 1 %), exposition brute
+dans la limite, aucune position courte en long-only, cible conforme aux hard
+controls, lots fiscaux égaux aux positions, aucune exception dans un
+gestionnaire d'événement. Une violation (`safety.invariants: halt`) met le
+moteur en HALTED, annule ses ordres et lève une alerte `INVARIANT` critique ;
+rien n'est liquidé. `alert` se contente de l'alerte.
+
+Côté broker, les fills sont appliqués d'après la **quantité cumulée** de
+chaque ordre : une mise à jour dupliquée ou en retard est ignorée, une mise à
+jour perdue est rattrapée par la suivante. Tant que le compte n'a jamais été
+lu (synchronisation en échec), aucun ordre n'est envoyé (alerte
+`BROKER_UNSYNCED`) et la lecture est retentée à chaque intervalle.
+
+Tests : `tests/test_properties.py` (hypothesis : contraintes, hard controls,
+gel de symboles, risk parity, lots fiscaux, change, calendrier, journal, fills
+dupliqués/perdus/désordonnés, moteur complet sur des marchés et des configs
+aléatoires) et `tests/test_chaos.py` (flux `trade_updates` dupliqué, perdu ou
+coupé, rejets broker en rafale, compte injoignable ou bloqué en séance,
+position broker corrompue, exception interne, état corrompu).
+
+### Calendrier de marché
+
+Avec le flux Alpaca, le moteur charge les séances officielles (`/v2/calendar`,
+règles NYSE en repli : fériés, jours observés, clôtures à 13h00 les veilles de
+fête). Hors séance, dans les 5 premières minutes et les 15 dernières, la
+décision est UDONOTHING avec la raison ; la durée des ordres est plafonnée à la
+clôture ; la fraîcheur des données se compte depuis l'ouverture (pas d'alerte
+la nuit ni le week-end). Le calendrier est journalisé (`CalendarEvent`) : le
+replay utilise les mêmes séances. `calendar.mode: on` l'active aussi en
+simulation, `off` le désactive.
+
+Limites : marché US ouvert (15h30-22h00 heure de Bruxelles) ; horloge système
+synchronisée (NTP) ; le flux `iex` ne couvre qu'une partie du volume, les
+estimations de participation sont donc prudentes.
 
 ---
 
@@ -86,61 +271,76 @@ Le backtesting n'est donc **pas le moteur principal** du système. Il reste un o
 Architecture principale :
 
 ```text
-                         REAL-TIME DATA
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        │                     │                     │
-        ▼                     ▼                     ▼
-   Market Data           Fundamentals             News
-        │                     │                     │
-        ▼                     ▼                     ▼
- Feature Engine        Fundamental Engine      AI / NLP
-        │                     │                     │
-        └─────────────────────┼─────────────────────┘
-                              ▼
-                       ONLINE LEARNING
-                              │
-             ┌────────────────┼────────────────┐
-             │                │                │
-             ▼                ▼                ▼
-            HMM          Volatility        Predictive
-          Regimes           Models           Models
-             │                │                │
-             └────────────────┼────────────────┘
-                              ▼
-                       SIGNAL FUSION
-                              │
-                              ▼
-                        RISK ENGINE
-                              │
-                              ▼
-                    ALLOCATION ENGINE
-                              │
-                              ▼
-                    CONSTRAINT ENGINE
-                              │
-                              ▼
-                       TARGET WEIGHTS
-                              │
-                              ▼
-                     DECISION ENGINE
-                       /           \
-                      ▼             ▼
-                UREBALANCE      UDONOTHING
-                      │
-                      ▼
-                EXECUTION ENGINE
-                      │
-              ┌───────┼────────┐
-              ▼       ▼        ▼
-           Quantity  Price   Timing
-              │       │        │
-              └───────┼────────┘
-                      ▼
-                 ORDER PROPOSAL
-                      │
-                      ▼
-             Human / Broker Execution
+                          REAL-TIME DATA
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+    Market Data            Fundamentals               News
+         └──────────────────────┼──────────────────────┘
+                                ▼
+                         DATA INTEGRITY
+                  (sanity checks, quarantaine,
+                   score de qualité par source)
+                                │
+                                ▼
+                         FEATURE ENGINE
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+    HMM REGIMES          PREDICTIVE MODELS         NLP / LLM
+  (conditionnement)    (factor, TSFM optionnel)   (événements)
+         └──────────────────────┼──────────────────────┘
+                                ▼
+                         MODEL ENSEMBLE
+                     ┌──────────┴──────────┐
+                     ▼                     ▼
+                PREDICTION            RELIABILITY
+                  μ ± σ           (skill par contexte)
+                     └──────────┬──────────┘
+                                ▼
+                          SIGNAL FUSION
+                  (corrélation des erreurs entre
+                   modèles, pas de double comptage)
+                                │
+                                ▼
+                       ROBUSTNESS ENGINE
+              (stress tests, désaccord, dégradation)
+                                │
+                                ▼
+                          RISK ENGINE
+                                │
+                                ▼
+                       ALLOCATION ENGINE
+                                │
+                                ▼
+                       CONSTRAINT ENGINE
+                                │
+                                ▼
+                    UREBALANCE / UDONOTHING
+                          │           │
+                          ▼           └──► aucune action
+                    EXECUTION ENGINE
+                          │
+                          ▼
+                     HARD CONTROLS
+            (limites indépendantes des modèles)
+                          │
+                          ▼
+                    ORDER PROPOSAL
+                          │
+                          ▼
+                Human / Broker Execution
+                          │
+                          ▼
+                  EXECUTION OBSERVED
+                ┌─────────┴─────────┐
+                ▼                   ▼
+          ALPHA LEARNING     EXECUTION LEARNING
+
+
+  SAFETY ENGINE : NORMAL / DEGRADED / HALTED
+  supervise toute la chaîne (données, modèles, risque, ordres) ;
+  en HALTED, seul UDONOTHING est possible.
 ```
 
 Ce n'est pas un bot qui cherche des occasions de `BUY` / `SELL`. C'est un
@@ -860,6 +1060,29 @@ value
 
 ---
 
+## Implémentation
+
+```text
+features/fundamentals.py   store point-in-time : une lecture « as of t » ne voit
+                           que les faits publiés à t (révisions comprises) ;
+                           fund_eps_surprise, fund_eps_growth (YoY),
+                           fund_revenue_growth, fund_guidance_change,
+                           fund_margin_change, qual_score (Σ w·tanh(f), atténué)
+news/news_engine.py        clusters d'articles (même id ou Jaccard après
+                           synonymes financiers) -> news_activity (événements,
+                           pas articles), news_echo, news_hours_since
+data/edgar.py              SEC EDGAR companyfacts ; disponible le lendemain du
+                           dépôt (l'heure d'acceptation n'est pas connue)
+data/alpaca_feed.py        AlpacaNewsFeed : un NewsEvent par symbole cité
+data/merge.py              fusion des sources (par réception, ou concurrente en live)
+```
+
+Sources (`qualitative.*.provider`) : `auto` (simulé seulement si le marché
+est simulé : jamais de fausses news mélangées à un flux réel), `none`,
+`simulated`, `file` (JSONL point-in-time), `edgar`, `alpaca`.
+
+---
+
 # 21. Information timing
 
 C'est une contrainte critique.
@@ -1239,6 +1462,30 @@ UDONOTHING & \text{sinon}
 \end{cases}
 $$
 
+### Implémentation (`decision/rebalance.py`)
+
+Tout est exprimé dans la devise du portefeuille (V = valeur) :
+
+```text
+TE²(w)     = (w - w_target)' Σ (w - w_target)                 écart de risque à la cible
+risque(f)  = V · γ/2 · H · [TE²(w_courant) - TE²(w_f)]        H = période de détention
+alpha(f)   = V · Σ Δw_i · μ_i · fiabilité_i                    rendement attendu, pondéré
+coûts(f)   = spread + slippage + commissions + TOB + impôt sur plus-values
+σ(f)       = sqrt(σ_alpha² + ((1 - robustesse) · risque(f))²)
+net(f)     = risque(f) + alpha(f) - coûts(f) - k · σ(f)
+```
+
+avec $w_f = w_c + f\,(w_{target} - w_c)$ pour plusieurs fractions $f$ : le
+rebalancement partiel **émerge des coûts** (bénéfice concave, coûts
+linéaires). σ_alpha est l'incertitude sur l'**estimation** de μ (erreur-type
+et désaccord des modèles), pas le bruit du rendement, déjà compté dans le
+terme de risque.
+
+Filtres avant tout calcul : HALTED, cible absente ou non robuste, symboles
+gelés ou aux données dégradées, bande de non-trading (hystérésis).
+`UDONOTHING` garde l'évaluation de la meilleure option rejetée
+(`evaluated_fraction`) pour expliquer pourquoi elle ne valait pas son coût.
+
 ---
 
 ## 31.1 Rebalancement partiel
@@ -1316,6 +1563,30 @@ $$
 
 Un signal HF qui disparaît dans 20 minutes n'est pas exécuté comme un signal
 LT valable plusieurs mois : l'urgence dépend de la demi-vie du signal.
+
+---
+
+### Implémentation (`execution/`)
+
+```text
+cost_model     spread (selon l'agressivité) + slippage + impact η·σ_jour·sqrt(Q/ADV) + frais
+fill_model     P(touch) = 2·(1 - Φ(d / σ_Δt)) × part du volume de marché × calibration
+order_pricer   limite = bid + a·(ask - bid) (achat), arrondie au tick
+optimizer      grille (agressivité, durée) : U = P_fill·(V(Δt) - C_exec) - C_risk
+feedback       fills observés -> calibration du fill, η (hors paper), confiance d'exécution
+paper_broker   exécution simulée au prix limite sur le flux ; jamais d'ordre réel
+```
+
+Le plan d'exécution respecte dès sa construction les plafonds connus
+(taille d'ordre, participation, budget de turnover du jour, cash
+disponible, ventes d'abord) : les hard controls restent le veto final pour
+les ordres anormaux, pas un mécanisme de dimensionnement. La décision utilise
+le même modèle de coût, et tant que la confiance d'exécution est faible,
+l'incertitude sur ces coûts élargit σ (MODEL ≠ EXECUTION CONFIDENCE).
+
+`execution.mode` : `off`, `proposals` (ordres proposés à un humain) ou
+`paper` (exécution simulée). En paper, l'impact n'est pas appris (les fills
+simulés ne le reflètent pas).
 
 ---
 
@@ -1487,6 +1758,24 @@ News score
 Latest events
 Confidence
 ```
+
+---
+
+### Implémentation (`api/`, `dashboard/`)
+
+- `api/state.py` construit l'état complet en JSON (portefeuille, positions,
+  signaux, régimes, modèles, risque, corrélations, allocation et attribution,
+  décision et historique, exécution, news, fondamentaux, alertes, fiscalité,
+  séries temporelles) ;
+- `api/server.py` : serveur HTTP sans dépendance dans la boucle asyncio du
+  moteur. Routes `GET /`, `/api/state`, `/api/history`, `/api/decisions`,
+  `/healthz`. **Lecture seule** (aucun reset, aucun ordre) ; écoute sur
+  127.0.0.1 par défaut, sans authentification ;
+- `dashboard/index.html` : une page, sans framework, rafraîchie toutes les
+  2 s ; thème clair / sombre ; couleurs validées pour le daltonisme ; les
+  textes venant des données (titres de news…) ne sont jamais interprétés en
+  HTML ;
+- `--export-dashboard` écrit un fichier HTML autonome avec l'état embarqué.
 
 ---
 
@@ -1973,6 +2262,34 @@ Cela permet de réduire :
 
 ---
 
+## Implémentation (`ai/`)
+
+```text
+schemas.py            schéma JSON strict de l'extraction + prompt système
+                      (extraire, jamais recommander ; texte de l'article = donnée
+                      non fiable, ses instructions sont ignorées)
+news_analyzer.py      ClaudeNewsAnalyzer : sortie structurée (json_schema), effort,
+                      fallbacks serveur si le modèle décline ; stop_reason vérifié ;
+                      SimulatedNewsAnalyzer déterministe (simulation, tests)
+validation.py         schéma, bornes (rejet, pas de correction silencieuse),
+                      cohérence, qualité de source, rumeurs, plausibilité des chiffres,
+                      confiance minimale
+news_intelligence.py  cascade d'effort (low -> high sur le même modèle), budget
+                      d'appels, dédoublonnage sémantique (le modèle voit les
+                      événements récents et désigne un doublon), score =
+                      impact × confiance × confirmation (sources distinctes),
+                      features ai_*, fondamentaux extraits, IMPORTANT_NEWS
+```
+
+Chaque analyse devient un `NewsAnalysisEvent` reçu **après** la latence du
+modèle et enregistré dans le journal : l'information n'est jamais utilisée
+avant d'être disponible, et le replay relit les analyses sans rappeler le
+modèle (même résultat, aucun coût). Les chiffres extraits d'une news ne
+deviennent des faits fondamentaux qu'à la réception de l'analyse, jamais à
+partir d'une rumeur ou d'une source peu fiable.
+
+---
+
 # 49. Limites et garde-fous
 
 L'architecture empile beaucoup de modèles
@@ -2172,7 +2489,200 @@ tax constraints
 
 ---
 
-# 50. V1 Development Roadmap
+# 50. Robustness / Adversarial Defense
+
+Objectif : **résister à la manipulation, aux données trompeuses et à
+l'exploitation du comportement du système**. Il ne s'agit pas de dissimuler
+une stratégie ni de contourner la surveillance du marché.
+
+Principe clé : **aucune source et aucun modèle ne peut, seul, provoquer un
+gros `UREBALANCE`**. La question n'est pas « la prédiction est-elle bonne ? »
+mais :
+
+> **La prédiction est-elle stable, indépendante, calibrée et économiquement utile ?**
+
+`UDONOTHING` devient alors aussi la réponse normale quand l'information est
+trop incertaine ou trop contradictoire, pas seulement quand la cible n'a pas
+bougé.
+
+## 50.1 Data Integrity
+
+Avant tout modèle. Un saut $|r_t| > k\sigma$ n'est pas automatiquement un
+crash : mauvaise donnée, split, corporate action, glitch de flux, timestamp
+incorrect.
+
+```text
+timestamp dans le futur / hors ordre
+prix ou taille invalides
+saut de prix non confirmé      → quarantaine jusqu'au trade suivant
+saut confirmé à un ratio de split (2:1, 3:1, 1:2…) → corporate action probable
+quote croisée (bid > ask), spread anormal
+barre incohérente (high < low, close hors range)
+flux figé (plus de données alors que le marché vit)
+```
+
+Un saut isolé est mis en **quarantaine** : confirmé par le trade suivant, il
+est accepté ; démenti (retour à l'ancien niveau), il est rejeté comme glitch.
+Chaque symbole et chaque source a un `DataIntegrityScore`.
+
+## 50.2 Safety Engine et hard controls
+
+```text
+NORMAL     tout est cohérent
+DEGRADED   désaccord des modèles, qualité des données ↓, modèle dégradé,
+           corporate action → rebalancements réduits, symboles concernés gelés
+HALTED     flux corrompu, explosion numérique, perte journalière max,
+           rejets répétés des hard controls → uniquement UDONOTHING
+```
+
+- l'escalade est immédiate, le retour de DEGRADED à NORMAL demande plusieurs
+  évaluations saines consécutives ;
+- **HALTED exige une remise en route manuelle** ;
+- **HALTED ne signifie pas liquider** : on arrête de décider, on ne vend pas
+  dans la panique.
+
+Les **hard controls** sont distincts du Constraint Engine : le Constraint
+Engine façonne la cible ; les hard controls sont un **veto final** sur les
+cibles et les ordres, avec leurs propres limites que les modèles ne peuvent
+pas modifier (poids maximal, exposition, taille d'ordre, participation, collar
+de prix, nombre d'opérations par jour, turnover journalier). C'est la même
+logique que les contrôles pré-trade d'accès au marché : bloquer les ordres
+erronés ou hors limites, même si un modèle produit `target = 0.99`.
+
+## 50.3 Model ensemble : accord ≠ indépendance
+
+L'accord entre modèles n'a de valeur que si leurs **erreurs** sont
+indépendantes. HMM, TSFM et momentum lisent la même série de prix : leur
+accord est gonflé par construction. La fusion utilise donc la **corrélation
+des erreurs** mesurée hors échantillon (deux modèles corrélés à 0.9 valent
+à peu près un seul modèle).
+
+Le désaccord entre **horizons** reste une information, pas forcément un
+défaut. Le HMM ne vote pas : il estime des régimes de volatilité et sert à
+**conditionner** les autres modèles. Un TSFM n'est ajouté que s'il bat la
+baseline en replay (§49.2).
+
+## 50.4 Modèle dégradé
+
+Quand les données deviennent incompatibles avec le modèle
+($P(data \mid model) \ll$ niveau habituel), le système déclenche
+`MODEL_DEGRADED` au lieu d'augmenter sa confiance : dérive de l'erreur
+(Page-Hinkley) pour les modèles prédictifs, chute durable de la
+log-vraisemblance pour les HMM.
+
+Pour les HMM, la vraisemblance prédictive **hors échantillon**
+$\log p(x_t \mid x_{1:t-1})$ est suivie par deux moyennes (rapide et lente) ;
+leur écart est normalisé par sa variance mesurée (ce qui tient compte de
+l'autocorrélation des observations). Une référence prise dans l'échantillon
+d'ajustement serait optimiste et produirait de fausses alertes. Un symbole
+dont le régime est dégradé est gelé par le Safety Engine.
+
+## 50.5 Prédictibilité ≠ fiabilité
+
+- **prédiction** : $\mu \pm \sigma$ ;
+- **fiabilité** : le modèle a-t-il été fiable récemment, **dans ce contexte** ?
+
+La fiabilité est d'abord le skill hors échantillon par régime, niveau de
+volatilité et horizon, ramené vers le skill global tant que les données sont
+rares (un méta-modèle complet demande beaucoup de résultats observés).
+
+## 50.6 Stress tests et perturbations
+
+- **online**, au moment d'un rebalancement : recalculer la cible sous
+  plusieurs scénarios (vol ×2, corrélations ↑, rendement −2σ, spread ×3) ; une
+  cible qui s'effondre sous des hypothèses proches n'est pas robuste ;
+- **offline**, dans les tests et le replay : de petites perturbations
+  $\delta$ des données ne doivent pas changer la décision,
+  $\|\Delta S\| \ll \|\delta\|$.
+
+## 50.7 News
+
+Articles quasi identiques → **un seul événement** (clustering), et
+
+$$
+Signal_{news} = Impact \times Confidence \times Novelty \times SourceQuality
+$$
+
+(source primaire ≠ quinze reprises d'une même rumeur).
+
+## 50.8 Décision : unités économiques, pas soupe de scores
+
+La décision garde tous les diagnostics pour l'explication :
+
+```python
+Decision(
+    action="UREBALANCE",
+    target_weight=0.15,
+    expected_return=0.024, uncertainty=0.011,
+    model_agreement=0.82, model_reliability=0.76,
+    data_quality=0.97, source_quality=0.91,
+    robustness_score=0.88, portfolio_risk=0.12,
+    execution_confidence=0.74,
+)
+```
+
+mais **ne multiplie pas** ces scores entre eux (ils ne sont pas calibrés sur
+la même échelle et leur produit tend vers zéro arbitrairement). Chacun agit
+en unités économiques :
+
+- **filtres** : qualité des données, état de sécurité, instabilité aux stress
+  tests → `UDONOTHING` ;
+- **incertitude** : désaccord et faible fiabilité **élargissent** $\sigma$ ;
+- **règle** :
+
+$$
+UREBALANCE \iff Benefit - Cost_{execution} > k \cdot \sigma_{effective}
+$$
+
+---
+
+# 51. Fiscalité : profils par pays
+
+Les taxes font partie des coûts d'un rebalancement
+($\alpha_{net} = \alpha_{gross} - \dots - C_{tax}$) : un signal faible peut
+être détruit par la taxe sur les transactions ou par l'impôt sur une
+plus-value réalisée.
+
+Chaque pays est décrit par un fichier TOML (`config/taxes/<PAYS>.toml`) ; le
+code est générique et ne contient aucun taux :
+
+```text
+[meta]              pays, devise, sources, date de vérification
+[regions]           groupes de pays (ex. EEA) utilisables dans les règles
+[transaction_tax]   règles ordonnées (première correspondance) avec taux et plafond
+[income_tax]        dividendes, intérêts, retenues étrangères
+[capital_gains]     taux, date d'entrée en vigueur, exonération, report, step-up
+[account_tax]       taxe annuelle sur la valeur d'un compte
+```
+
+Les instruments sont classés dans `config.yaml` (`asset_class`, `domicile`,
+`distribution`, `registered_locally`) ; un instrument non classé reçoit la
+règle par défaut (prudente) et déclenche un avertissement.
+
+### Belgique (`config/taxes/BE.toml`)
+
+| Taxe | Règle modélisée |
+| ---- | --------------- |
+| TOB  | 0,12 % ETF domiciliés EEE et obligations (plafond 1 300 €), 0,35 % actions et ETF hors EEE (plafond 1 600 €), 1,32 % fonds de capitalisation enregistrés en Belgique (plafond 4 000 €), à l'achat et à la vente ; auto-déclarée avec un broker étranger |
+| Précompte mobilier | 30 % sur dividendes et intérêts, après retenue étrangère (US 15 %) ; exonération des premiers dividendes via la déclaration |
+| Plus-values (2026) | 10 % sur les plus-values réalisées nettes de l'année, exonération annuelle de 10 000 € avec report de 1 000 €/an (5 ans max), plus-values historiques gelées au 31/12/2025, lots FIFO |
+| Comptes-titres | 0,15 % au-delà d'une valeur moyenne de 1 M€ |
+
+⚠ Le profil n'est **pas un conseil fiscal** : montants indexés et taxe sur
+les plus-values récente, à vérifier auprès du SPF Finances puis à marquer
+`verified_on`. Un trading très fréquent peut aussi être requalifié en revenus
+divers (33 %).
+
+Le moteur :
+
+- comptabilise la TOB et les lots fiscaux à chaque fill ;
+- estime **avant** de décider le coût fiscal de rejoindre la cible
+  (TOB + impôt marginal sur les plus-values), qui entrera dans
+  $U_{rebalance}$ (Decision Engine).
+
+---
+
+# 52. V1 Development Roadmap
 
 ## Phase 1 — Core
 
@@ -2220,175 +2730,219 @@ tax constraints
 ## Phase 5 — Online Models
 
 ```text
-[ ] Signal = rendement attendu ± incertitude
-[ ] HMM-HF
-[ ] HMM-MT
-[ ] HMM-LT
-[ ] Online factor model
-[ ] Forgetting / regularization / minimum sample size
-[ ] Stability & drift monitoring
+[x] Signal = rendement attendu ± incertitude
+[x] HMM-HF
+[x] HMM-MT
+[x] HMM-LT
+[x] Online factor model
+[x] Forgetting / regularization / minimum sample size
+[x] Stability & drift monitoring
 ```
 
 ## Phase 6 — Risk
 
 ```text
-[ ] Portfolio volatility
-[ ] Covariance
-[ ] Risk contribution
-[ ] Drawdown
-[ ] Concentration
-[ ] Limits
+[x] Portfolio volatility
+[x] Covariance
+[x] Risk contribution
+[x] Drawdown
+[x] Concentration
+[x] Limits
 ```
 
 ## Phase 7 — Allocation & Constraints
 
 ```text
-[ ] Signal → target weight
-[ ] Volatility targeting
-[ ] Risk parity
-[ ] HRP
-[ ] Constraint engine
-[ ] Target attribution
-[ ] Drift monitoring
+[x] Signal → target weight
+[x] Volatility targeting
+[x] Risk parity
+[x] HRP
+[x] Constraint engine
+[x] Target attribution
+[x] Drift monitoring
 ```
 
-## Phase 8 — Qualitative
+## Phase 8 — Data Integrity & Safety
 
 ```text
-[ ] Fundamental data
-[ ] Earnings events
-[ ] Guidance
-[ ] SEC/filings
-[ ] News feed
+[x] Sanity checks (timestamps, prix, quotes, barres)
+[x] Quarantaine des sauts non confirmés
+[x] Détection de corporate actions probables
+[x] Flux figé
+[x] DataIntegrityScore par symbole
+[x] Safety Engine (NORMAL / DEGRADED / HALTED)
+[x] Perte journalière maximale
+[x] Hard controls (cibles et ordres)
 ```
 
-## Phase 9 — AI
+## Phase 9 — Robustness
 
 ```text
-[ ] Structured output schema
-[ ] News extraction
-[ ] Event classification
-[ ] Sentiment
-[ ] Novelty
-[ ] Confidence
-[ ] Fundamental extraction
-[ ] Validation pipeline (schema, range, source)
-[ ] Event deduplication / clustering
+[x] MODEL_DEGRADED (vraisemblance HMM)
+[x] Fiabilité par contexte (régime)
+[x] Corrélation des erreurs entre modèles (ensemble)
+[x] Stress tests de la cible
+[x] Tests de perturbation (suite de tests / replay)
 ```
 
-## Phase 10 — Decision Engine
+## Phase 10 — Qualitative
 
 ```text
-[ ] Signal fusion (sans double comptage)
-[ ] Risk checks
-[ ] Hystérésis
-[ ] U_rebalance vs U_donothing (alpha net)
-[ ] Partial rebalance (execution weight, urgency)
-[ ] Reason generation
-[ ] Alerts
+[x] Fundamental data (point-in-time, anti-look-ahead)
+[x] Earnings events (surprise vs consensus)
+[x] Guidance
+[x] SEC/filings (EDGAR companyfacts)
+[x] News feed (Alpaca news, dédupliqué en événements)
 ```
 
-## Phase 11 — Execution
+## Phase 11 — AI
 
 ```text
-[ ] Cost model (spread, slippage, fees)
-[ ] Impact model / participation
-[ ] Fill model
-[ ] Execution confidence
-[ ] Order pricer
-[ ] Order optimizer
-[ ] Order proposals
-[ ] Execution feedback loop
+[x] Structured output schema
+[x] News extraction (Claude, sortie structurée)
+[x] Event classification
+[x] Sentiment
+[x] Novelty
+[x] Confidence
+[x] Fundamental extraction
+[x] Validation pipeline (schema, range, source)
+[x] Event deduplication / clustering (sémantique via le modèle)
+[x] Source quality / diversity
 ```
 
-## Phase 12 — Dashboard
+## Phase 12 — Decision Engine
 
 ```text
-[ ] Portfolio overview
-[ ] Position monitor
-[ ] Signal monitor
-[ ] Regime monitor
-[ ] Risk monitor
-[ ] News/events
-[ ] Decision history
-[ ] Execution monitor
+[x] Signal fusion (ensemble, sans double comptage des modèles)
+[x] Risk checks
+[x] Hystérésis (bande de non-trading)
+[x] Profils fiscaux par pays (TOML) — Belgique
+[x] Coût fiscal dans U_rebalance
+[x] U_rebalance vs U_donothing (alpha net, k · σ effectif)
+[x] Filtres : data quality, safety state, stress tests
+[x] Partial rebalance (execution weight, urgency)
+[x] Reason generation
+[x] Alerts
+[x] Journal des décisions
+```
+
+## Phase 13 — Execution
+
+```text
+[x] Cost model (spread, slippage, fees)
+[x] Impact model / participation
+[x] Fill model
+[x] Execution confidence
+[x] Order pricer
+[x] Order optimizer
+[x] Order proposals
+[x] Execution feedback loop
+[x] Paper broker (aucun ordre réel)
+[x] Broker Alpaca paper (ordres + trade_updates, verrouillé sur l'hôte paper)
+[x] Synchronisation et rapprochement du compte broker
+[x] Warm-up historique (barres Alpaca REST au démarrage)
+[x] Calendrier de marché (séances, fériés, clôtures anticipées)
+[x] Change EUR/USD (cours BCE) dans la fiscalité
+[x] Registre fiscal persistant (lots datés, plus-values, TOB à déclarer)
+[x] Backtest sur données historiques (références, walk-forward, rapport USD/EUR)
+[x] Moniteur d'invariants (HALTED sur violation), fills broker idempotents
+[x] Tests de propriétés (hypothesis) et tests de chaos
+```
+
+## Phase 14 — Dashboard
+
+```text
+[x] Portfolio overview
+[x] Position monitor
+[x] Signal monitor
+[x] Regime monitor
+[x] Risk monitor
+[x] News/events
+[x] Decision history
+[x] Execution monitor
+[x] Export statique (analyse d'une simulation / d'un replay)
 ```
 
 ---
 
-# 51. Final target architecture
+# 53. Final target architecture
 
 ```text
-                           ┌───────────────────────┐
-                           │       ALPACA          │
-                           │                       │
-                           │ Market │ News │ Data │
-                           └───────────┬───────────┘
-                                       │
-                                       ▼
-                              ┌────────────────┐
-                              │    EVENT BUS   │
-                              └───────┬────────┘
-                                      │
-             ┌────────────────────────┼────────────────────────┐
-             │                        │                        │
-             ▼                        ▼                        ▼
-       MARKET ENGINE            FUNDAMENTAL               NEWS ENGINE
-             │                    ENGINE                       │
-             │                        │                        ▼
-             │                        │                  Structured AI
-             │                        │                        │
-             └──────────────┬─────────┴────────────────────────┘
-                            │
-                            ▼
-                     FEATURE ENGINE
-                            │
-            ┌───────────────┼────────────────┐
-            ▼               ▼                ▼
-          HMM-HF          HMM-MT           HMM-LT
-            │               │                │
-            └───────────────┼────────────────┘
-                            ▼
-                    ONLINE MODELS
-                            │
-                            ▼
-                      SIGNAL FUSION
-                            │
-                            ▼
-                     PORTFOLIO ENGINE
-                            │
-                            ▼
-                       RISK ENGINE
-                            │
-                            ▼
-                    ALLOCATION ENGINE
-                            │
-                            ▼
-                    CONSTRAINT ENGINE
-                            │
-                            ▼
-                    DECISION ENGINE
-                            │
-                  ┌─────────┴─────────┐
-                  ▼                   ▼
-             UREBALANCE          UDONOTHING
-                  │
-                  ▼
-           EXECUTION ENGINE
-                  │
-                  ▼
-            ORDER PROPOSAL ──────► DASHBOARD / ALERTS
-                  │
-                  ▼
-       HUMAN / BROKER EXECUTION
-                  │
-                  ▼
-           OBSERVE RESULT ───────► ONLINE LEARNING
+                          REAL-TIME DATA
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+    Market Data            Fundamentals               News
+         └──────────────────────┼──────────────────────┘
+                                ▼
+                         DATA INTEGRITY
+                  (sanity checks, quarantaine,
+                   score de qualité par source)
+                                │
+                                ▼
+                         FEATURE ENGINE
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+    HMM REGIMES          PREDICTIVE MODELS         NLP / LLM
+  (conditionnement)    (factor, TSFM optionnel)   (événements)
+         └──────────────────────┼──────────────────────┘
+                                ▼
+                         MODEL ENSEMBLE
+                     ┌──────────┴──────────┐
+                     ▼                     ▼
+                PREDICTION            RELIABILITY
+                  μ ± σ           (skill par contexte)
+                     └──────────┬──────────┘
+                                ▼
+                          SIGNAL FUSION
+                  (corrélation des erreurs entre
+                   modèles, pas de double comptage)
+                                │
+                                ▼
+                       ROBUSTNESS ENGINE
+              (stress tests, désaccord, dégradation)
+                                │
+                                ▼
+                          RISK ENGINE
+                                │
+                                ▼
+                       ALLOCATION ENGINE
+                                │
+                                ▼
+                       CONSTRAINT ENGINE
+                                │
+                                ▼
+                    UREBALANCE / UDONOTHING
+                          │           │
+                          ▼           └──► aucune action
+                    EXECUTION ENGINE
+                          │
+                          ▼
+                     HARD CONTROLS
+            (limites indépendantes des modèles)
+                          │
+                          ▼
+                    ORDER PROPOSAL
+                          │
+                          ▼
+                Human / Broker Execution
+                          │
+                          ▼
+                  EXECUTION OBSERVED
+                ┌─────────┴─────────┐
+                ▼                   ▼
+          ALPHA LEARNING     EXECUTION LEARNING
+
+
+  SAFETY ENGINE : NORMAL / DEGRADED / HALTED
+  supervise toute la chaîne (données, modèles, risque, ordres) ;
+  en HALTED, seul UDONOTHING est possible.
 ```
 
 ---
 
-# 52. Design principles
+# 54. Design principles
 
 Le projet doit respecter les principes suivants :
 
@@ -2413,10 +2967,14 @@ Le projet doit respecter les principes suivants :
 19. **Live and replay run the exact same engine**
 20. **Signals are expected returns with uncertainty, compared to costs**
 21. **Every module must prove its incremental value against a simple baseline**
+22. **No single source or model can trigger a large rebalance on its own**
+23. **Model agreement only counts if model errors are independent**
+24. **Hard controls are independent of models and cannot be changed by them**
+25. **When in doubt, UDONOTHING: uncertainty is a reason not to act**
 
 ---
 
-# 53. First implementation milestone
+# 55. First implementation milestone
 
 La première milestone concrète est volontairement petite :
 

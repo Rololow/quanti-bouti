@@ -3,7 +3,8 @@ from datetime import timedelta
 
 import pytest
 
-from trading_engine.allocation.baseline import BaselineAllocator, periods_per_year
+from trading_engine.allocation.baseline import BaselineAllocator
+from trading_engine.timeutils import periods_per_year
 from trading_engine.data.events import BarEvent
 from trading_engine.features.feature_engine import FeatureEngine
 

@@ -53,6 +53,9 @@ class Portfolio:
         self.cash -= quantity * price
         return updated
 
+    def total_value(self) -> float:
+        return self.cash + sum(pos.quantity * self._price(pos) for pos in self.positions.values())
+
     def set_target_weights(self, weights: Mapping[str, float]) -> None:
         self.target_weights = dict(weights)
 
@@ -63,8 +66,10 @@ class Portfolio:
     def snapshot(
         self,
         volatilities: Mapping[str, float | None] | None = None,
+        risk_contributions: Mapping[str, float | None] | None = None,
     ) -> PortfolioState:
         volatilities = volatilities or {}
+        risk_contributions = risk_contributions or {}
         values = {sym: pos.quantity * self._price(pos) for sym, pos in self.positions.items()}
         market_value = sum(values.values())
         total_value = self.cash + market_value
@@ -87,6 +92,7 @@ class Portfolio:
                     weight=mv / total_value if total_value else 0.0,
                     target_weight=self.target_weights.get(sym, 0.0),
                     volatility=volatilities.get(sym),
+                    risk_contribution=risk_contributions.get(sym),
                 )
             )
 

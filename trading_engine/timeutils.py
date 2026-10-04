@@ -44,3 +44,26 @@ def parse_rfc3339(value: str) -> datetime:
     Les chiffres au-delà de la microseconde sont tronqués.
     """
     return ensure_utc(datetime.fromisoformat(value))
+
+
+def format_timeframe(delta: timedelta) -> str:
+    """Inverse de `parse_timeframe` : 30 minutes -> '30m', 2 jours -> '2d'."""
+    seconds = int(delta.total_seconds())
+    if seconds <= 0 or seconds != delta.total_seconds():
+        raise ValueError(f"unsupported timeframe: {delta!r}")
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+TRADING_DAYS_PER_YEAR = 252
+TRADING_HOURS_PER_DAY = 6.5
+
+
+def periods_per_year(timeframe: str) -> float:
+    """Nombre de barres par an (séance actions de 6h30 pour l'intraday)."""
+    step = parse_timeframe(timeframe)
+    if step >= timedelta(days=1):
+        return TRADING_DAYS_PER_YEAR / (step / timedelta(days=1))
+    return TRADING_DAYS_PER_YEAR * timedelta(hours=TRADING_HOURS_PER_DAY) / step

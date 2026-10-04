@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Mapping
 
 from trading_engine.data.events import MarketEvent, QuoteEvent, TradeEvent
+from trading_engine.timeutils import TRADING_DAYS_PER_YEAR, TRADING_HOURS_PER_DAY
 
 
 class MarketFeed(abc.ABC):
@@ -37,7 +38,10 @@ class SimulatedMarketFeed(MarketFeed):
         max_events: int | None = None,
         quote_probability: float = 0.3,
         realtime: bool = False,
+        speed: float = 0.0,
     ) -> None:
+        """`speed` : 0 = aussi vite que possible ; 1 = temps réel ; 60 = 60× plus vite.
+        (`realtime=True` équivaut à speed=1.)"""
         if not initial_prices:
             raise ValueError("at least one symbol is required")
         self.prices = dict(initial_prices)
@@ -46,9 +50,11 @@ class SimulatedMarketFeed(MarketFeed):
         self.step = timedelta(seconds=tick_seconds)
         self.max_events = max_events
         self.quote_probability = quote_probability
-        self.realtime = realtime
-        # Volatilité par tick (temps continu 24/7 simplifié).
-        seconds_per_year = 365 * 24 * 3600
+        self.speed = 1.0 if realtime and not speed else speed
+        # Volatilité par tick, avec la même convention que le moteur
+        # (252 séances de 6h30 par an) : la volatilité annualisée mesurée par le
+        # moteur retrouve `annual_vol`, même si l'horloge simulée tourne en continu.
+        seconds_per_year = TRADING_DAYS_PER_YEAR * TRADING_HOURS_PER_DAY * 3600
         self.tick_vol = annual_vol * math.sqrt(tick_seconds / seconds_per_year)
 
     async def __aiter__(self) -> AsyncIterator[MarketEvent]:
@@ -84,7 +90,7 @@ class SimulatedMarketFeed(MarketFeed):
                 )
             yield event
             n += 1
-            if self.realtime:
-                await asyncio.sleep(self.step.total_seconds())
+            if self.speed > 0:
+                await asyncio.sleep(self.step.total_seconds() / self.speed)
             else:
                 await asyncio.sleep(0)

@@ -2,9 +2,9 @@
 
 engine:
   # Nombre d'événements traités avant l'arrêt (null = infini).
-  max_events: 20000
+  max_events: 60000
   # Affichage console toutes les N trades.
-  report_every: 5000
+  report_every: 20000
 
 feed:
   # "simulated" (flux déterministe, sans clé), "alpaca" (temps réel) ou
@@ -16,6 +16,8 @@ feed:
   seed: 42
   # Intervalle entre deux trades simulés (secondes de temps de marché).
   tick_seconds: 5.0
+  annual_vol: 0.20        # volatilité annualisée simulée (convention 252 × 6h30)
+  sim_speed: 0            # 0 = aussi vite que possible ; 600 = 600× le temps réel (dashboard)
   alpaca:
     # "iex" (plan gratuit) ou "sip" (plan payant). url permet de forcer un
     # autre endpoint, ex. wss://stream.data.alpaca.markets/v2/test.
@@ -41,11 +43,29 @@ features:
   correlation_timeframes: [5m, 1h, 1d]
 
 allocation:
-  # Interrupteur d'ablation : "static" (portfolio.target_weights) ou
-  # "baseline" (momentum + volatility targeting, la référence à battre).
+  # Interrupteur d'ablation :
+  #   static      : portfolio.target_weights
+  #   baseline    : momentum + volatility targeting (la référence à battre)
+  #   risk_parity : contributions au risque égales
+  #   hrp         : hierarchical risk parity
+  #   signal      : budgets de risque issus des signaux (pondérés par le skill
+  #                 du modèle) + risk parity
   method: static
-  # Recalcul de la cible à chaque clôture de barre de ce timeframe.
+  # Recalcul de la cible (et du rapport de risque) à chaque barre de ce timeframe.
   rebalance_timeframe: 1h
+  target_vol: 0.10       # volatilité annualisée visée
+  min_skill: 0.0         # skill minimum d'un modèle pour influencer la cible
+  constraints:
+    max_weight: 0.40
+    min_weight: 0.0      # 0 = long-only
+    max_gross: 1.0
+    min_cash: 0.02
+    max_portfolio_vol: 0.15
+    # Turnover par rebalancement : null = la cible reste la cible idéale, la
+    # trajectoire (rebalancement partiel) est décidée par le Decision Engine.
+    max_turnover: null
+    sectors: {SPY: equity, QQQ: equity, TLT: bonds, GLD: commodities}
+    sector_limits: {equity: 0.60}
   baseline:
     momentum_horizon: 1h
     vol_timeframe: 1h
@@ -53,9 +73,252 @@ allocation:
     budget: 1.0          # fraction maximale investie
     max_weight: 0.40
 
+models:
+  # HMM de régime par symbole et par horizon (estimation probabiliste).
+  regimes:
+    enabled: true
+    n_states: 3            # LOW_VOL / MID_VOL / HIGH_VOL
+    timeframes: {HF: 5m, MT: 1h, LT: 1d}
+    min_samples: 100       # warm-up avant le premier ajustement
+    window: 500            # fenêtre glissante (oubli)
+    refit_every: 50        # ré-ajustement Baum-Welch toutes les N barres
+    degraded_z: 4.0        # MODEL_DEGRADED : vraisemblance récente < moyenne longue - z écarts-types
+  # Prédicteurs online E[r_{t+h} | features] avec incertitude et fiabilité par
+  # régime. Même timeframe et même horizon pour tous (ils sont combinés).
+  predictors:
+    - name: trend
+      timeframe: 5m
+      horizon_bars: 6      # prévision à 30 minutes
+      features: [mom_30m, mom_1h]
+      forgetting: 0.995    # poids lambda^age des observations passées
+      ridge: 10.0          # régularisation
+      min_samples: 50      # pas de signal avant N résultats observés
+    - name: reversion
+      timeframe: 5m
+      horizon_bars: 6
+      features: [z_5m, reversal_5m, vwap_dist]
+      forgetting: 0.995
+      ridge: 10.0
+      min_samples: 50
+    # Fondamentaux + news : à activer avec des données réelles (sur données
+    # simulées, ils n'ont aucun pouvoir prédictif par construction).
+    - name: quality
+      enabled: false
+      timeframe: 5m
+      horizon_bars: 6
+      features: [qual_score, fund_eps_surprise, news_activity]
+      forgetting: 0.999
+      ridge: 10.0
+      min_samples: 50
+  # Combinaison selon la corrélation des erreurs (accord ≠ indépendance).
+  ensemble:
+    lam: 0.99
+    shrinkage: 0.5
+    min_samples: 30
+
+risk:
+  timeframe: 1h          # barres utilisées pour la covariance
+  shrinkage: 0.1         # shrinkage de la covariance vers sa diagonale
+  min_observations: 20   # barres minimum avant toute covariance (et donc allocation)
+  limits:
+    max_weight: 0.40
+    max_gross_leverage: 1.0
+    max_portfolio_vol: 0.20
+    max_drawdown: 0.15
+    max_risk_contribution: 0.50
+    max_position_drawdown: 0.25
+    max_drift: 0.05
+
+decision:
+  # UREBALANCE si bénéfice (risque + alpha) - coûts - k·σ > min_net_benefit
+  enabled: true
+  risk_aversion: 5.0        # γ : valeur d'une réduction de l'écart de risque à la cible
+  holding_period: 5d        # horizon sur lequel cet écart est valorisé
+  k_sigma: 1.0              # marge exigée par rapport à l'incertitude
+  no_trade_band: 0.02       # hystérésis : |cible - poids| < 2 % -> on ne touche pas
+  fractions: [0.25, 0.5, 1.0]   # rebalancement partiel : part du chemin évaluée
+  min_net_benefit: 0.0
+  # Utilisés seulement si aucun modèle de coût d'exécution n'est branché
+  # (sinon : execution.cost, le même modèle que l'exécution).
+  default_spread_bps: 5.0
+  slippage_bps: 2.0
+  commission_per_order: 0.0
+  min_robustness: 0.3       # stress tests : en dessous, cible jugée non fiable
+  min_data_score: 0.9
+  include_alpha: true
+
+execution:
+  # off | proposals | paper | alpaca_paper — aucun compte réel n'est JAMAIS utilisé.
+  # paper : exécution simulée localement sur le flux (au prix limite) ;
+  # alpaca_paper : ordres envoyés au compte PAPER Alpaca (feed.provider: alpaca).
+  mode: paper
+  sync_portfolio: true      # alpaca_paper : cash et positions lus sur le compte
+  reconcile: true           # alpaca_paper : rapprochement à chaque intervalle
+  time_in_force: day
+  volume_timeframe: 5m      # barres utilisées pour estimer le volume de marché
+  max_participation: 0.10   # part maximale du volume de marché
+  fill_share: 1.0           # paper : part d'un trade imprimé qu'on peut prendre
+  learn_impact: false       # paper : fills simulés -> ne pas apprendre l'impact
+  cost:
+    default_spread_bps: 5.0
+    slippage_bps: 1.0
+    impact_eta: 0.5         # impact = η · σ_jour · sqrt(Q / ADV), prior à recalibrer
+    commission_per_order: 0.0
+    commission_per_share: 0.0
+    default_daily_vol: 0.015
+    default_adv: 1000000
+  optimizer:
+    aggressiveness: [0.0, 0.5, 1.0]   # 0 passif (bid/ask), 1 croise le spread
+    durations: [5m, 30m, 1h]
+    alpha_half_life: 1h     # la part alpha de la valeur décroît avec cette demi-vie
+    timing_risk_aversion: 1.0
+    allow_fractional: false
+    tick: 0.01
+
+alerts:
+  vol_fast: 5m
+  vol_slow: 1h
+  vol_spike_ratio: 2.0
+  correlation_timeframe: 1h
+  correlation_jump: 0.3
+  reversal_t: 0.5
+  disagreement_share: 0.5
+  regime_horizons: [MT, LT]    # les régimes HF basculent souvent : pas d'alerte
+  regime_min_confidence: 0.8
+
+robustness:
+  # Stress tests de la cible à chaque rebalancement (vol d'un actif ×1.5,
+  # corrélations ↑/↓, signaux ±1σ). Score = stabilité de la forme de l'allocation.
+  enabled: true
+  min_score: 0.7   # en dessous : on ne fait que score × le chemin vers la cible
+  vol_bump: 1.5
+
+integrity:
+  max_clock_skew: 2.0     # s d'avance tolérées sur l'heure de réception
+  max_lateness: 300.0     # s de retard max par rapport au dernier événement du symbole
+  jump_k: 12.0            # saut suspect : > jump_k × |rendement| moyen ...
+  min_jump: 0.02          # ... et > 2 % -> quarantaine jusqu'au trade suivant
+  warmup_ticks: 20
+  max_spread: 0.05        # spread relatif signalé au-delà
+  stale_after: 300.0      # s sans donnée -> symbole figé
+
+safety:
+  degrade_data_score: 0.90
+  halt_data_score: 0.50
+  max_daily_loss: 0.03             # HALTED au-delà (aucune liquidation automatique)
+  halt_on_breaches: [DRAWDOWN, LEVERAGE]
+  max_hard_control_rejections: 3   # par jour
+  recovery_intervals: 3            # évaluations saines avant DEGRADED -> NORMAL
+  corporate_action_hold: 86400     # s de gel d'un symbole après un split probable
+  degraded_rebalance_factor: 0.5
+  # Invariants vérifiés après chaque intervalle et chaque événement du compte
+  # (cash, exposition, positions courtes, cible, lots fiscaux, exceptions).
+  # halt : HALTED + annulation des ordres + alerte ; alert : alerte seule.
+  invariants: halt
+  invariant_cash_tolerance: 0.01
+  invariant_gross_tolerance: 0.02
+
+# Veto final, indépendant des modèles et du Constraint Engine.
+hard_controls:
+  max_target_weight: 0.50
+  max_target_gross: 1.0
+  max_order_notional: 50000
+  max_order_weight: 0.20
+  max_participation: 0.10
+  price_collar: 0.05
+  max_orders_per_day: 50
+  max_daily_turnover: 1.0
+
+qualitative:
+  # Sources : auto = simulé si feed.provider est "simulated", sinon aucune
+  # (jamais de fausses news mélangées à un flux réel).
+  fundamentals:
+    provider: auto          # auto | none | simulated | file | edgar
+    path: null              # file : JSONL de FundamentalEvent (point-in-time)
+    half_life_days: 30      # atténuation du score qualitatif
+    weights: {fund_eps_surprise: 0.4, fund_eps_growth: 0.2, fund_revenue_growth: 0.2, fund_guidance_change: 0.2}
+    # edgar : la SEC exige un User-Agent "Nom email" ; CIK par symbole (actions US).
+    edgar_user_agent: ""
+    edgar_ciks: {}          # ex. {AAPL: 320193}
+    edgar_poll_every: 3600
+  news:
+    provider: auto          # auto | none | simulated | file | alpaca
+    path: null
+    similarity: 0.5         # Jaccard (après synonymes) pour regrouper les reprises
+    window: 24h
+    activity_half_life: 6h
+  simulated:
+    earnings_every: 24h
+    news_every: 3h
+    duplicate_probability: 0.5
+
+ai:
+  # Extraction structurée des news par LLM (texte -> données, jamais -> décision).
+  # auto : simulé si le marché est simulé, sinon désactivé.
+  # claude : API Claude (ANTHROPIC_API_KEY ou `ant auth login`) ; payant.
+  provider: auto            # auto | none | simulated | claude
+  model: claude-opus-5
+  fast_effort: low          # 1er passage, peu coûteux
+  escalated_effort: high    # 2e passage si validation échouée ou confiance < seuil
+  escalate_below_confidence: 0.6
+  min_confidence: 0.5       # en dessous : l'analyse n'alimente aucun signal
+  max_calls_per_hour: 120   # budget d'appels
+  important_threshold: 0.7  # alerte IMPORTANT_NEWS (importance et confiance)
+  extract_fundamentals: true
+  server_fallbacks: true    # si le modèle décline, l'API rejoue sur un modèle de repli
+  simulated_latency_seconds: 5
+
+calendar:
+  # Séances NYSE : aucune décision hors séance ni près de l'ouverture / clôture.
+  # auto : actif avec le flux Alpaca (calendrier Alpaca), inactif en simulation.
+  # on : règles NYSE (fériés, clôtures à 13h00) quel que soit le flux. off : 24/7.
+  mode: auto
+  avoid_open_minutes: 5
+  avoid_close_minutes: 15
+  horizon_days: 30
+
+warmup:
+  # Flux Alpaca : historique chargé au démarrage (jours calendaires) pour que
+  # covariance, régimes et momentum soient prêts tout de suite.
+  enabled: true
+  lookback_days: {5m: 5, 1h: 45, 1d: 400}
+
+tax:
+  # Profil fiscal du pays de résidence (null = pas de fiscalité).
+  # Voir config/taxes/BE.toml : à vérifier avant tout usage réel.
+  profile: config/taxes/BE.toml
+  # Prix de référence au 31/12/2025 des positions détenues avant la taxe sur
+  # les plus-values, en devise du portefeuille (convertis au cours BCE du
+  # 31/12/2025), ex. {SPY: 640.0}.
+  step_up_prices: {}
+  # Registre fiscal persistant : lots datés (en EUR), plus-values réalisées,
+  # lignes de TOB à déclarer. Écrit seulement en execution.mode alpaca_paper.
+  ledger_path: data/tax_ledger.json
+
+fx:
+  # Le compte est en USD, l'impôt en EUR : conversion au cours BCE du jour de
+  # chaque opération (plus-values : l'effet de change est taxable).
+  # auto : BCE avec le flux Alpaca, taux fixe en simulation. ecb | fixed | off
+  provider: auto
+  portfolio_currency: USD
+  fixed_rate: 1.10          # USD pour 1 EUR (simulation, et repli si la BCE est injoignable)
+  history_days: 400
+
+# Classification fiscale des instruments (utilisée par les règles du profil).
+#   asset_class: stock | etf | fund | bond
+#   domicile: code pays ISO-2 ; distribution: distributing | accumulating
+#   registered_locally: offert publiquement en Belgique (TOB 1,32 % si capitalisant)
+instruments:
+  SPY: {asset_class: etf, domicile: US, distribution: distributing}
+  QQQ: {asset_class: etf, domicile: US, distribution: distributing}
+  TLT: {asset_class: etf, domicile: US, distribution: distributing}
+  GLD: {asset_class: etf, domicile: US, distribution: accumulating}
+
 storage:
   # Journal JSONL des événements bruts reçus (null = désactivé). Sert au replay.
   event_log: null
+  # Journal JSONL des décisions avec tous leurs diagnostics (null = désactivé).
+  decision_log: null
 
 volatility:
   # Facteur de décroissance EWMA (RiskMetrics : 0.94 en daily).

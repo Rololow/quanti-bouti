@@ -18,8 +18,12 @@ def _config(**overrides):
     feed = dataclasses.replace(cfg.feed, **overrides.pop("feed", {}))
     storage = dataclasses.replace(cfg.storage, **overrides.pop("storage", {}))
     allocation = dataclasses.replace(cfg.allocation, **overrides.pop("allocation", {}))
+    # résultats simulés toutes les 4 h : le test ne couvre que 11 h de marché
+    qualitative = dataclasses.replace(cfg.qualitative, sim_earnings_every="4h")
     return dataclasses.replace(cfg, engine=engine, feed=feed, storage=storage,
-                               allocation=allocation, **overrides)
+                               allocation=allocation, qualitative=qualitative,
+                               risk=dataclasses.replace(cfg.risk, min_observations=5),  # 8000 événements = 11 h
+                               **overrides)
 
 
 def test_event_roundtrip(t0):
@@ -64,7 +68,7 @@ def test_replay_feed_missing_file(tmp_path):
         ReplayFeed(tmp_path / "nope.jsonl")
 
 
-@pytest.mark.parametrize("method", ["static", "baseline"])
+@pytest.mark.parametrize("method", ["static", "baseline", "risk_parity", "hrp", "signal"])
 def test_live_and_replay_produce_identical_state(tmp_path, method):
     """Même moteur, source différente -> même état (README §43)."""
     log = tmp_path / "events.jsonl"
@@ -81,6 +85,19 @@ def test_live_and_replay_produce_identical_state(tmp_path, method):
     for sym in live.features.symbols():
         assert replay.features.snapshot(sym) == live.features.snapshot(sym)
     assert [b.close for b in replay.bars] == [b.close for b in live.bars]
-    if method == "baseline":
+    for sym in live.features.symbols():
+        assert replay.models.regimes(sym) == live.models.regimes(sym)
+        assert replay.models.signals(sym) == live.models.signals(sym)
+    assert any(live.models.regimes(sym) for sym in live.features.symbols())
+    assert replay.risk_report == live.risk_report
+    assert replay.safety.status == live.safety.status
+    assert list(replay.decisions) == list(live.decisions)
+    assert replay.fundamentals.store.count == live.fundamentals.store.count > 0
+    assert replay.news.articles == live.news.articles > 0
+    assert list(replay.alerts) == list(live.alerts)
+    assert live.decisions, "une décision par intervalle"
+    assert replay.integrity.counts == live.integrity.counts
+    assert replay.integrity.scores() == live.integrity.scores()
+    if method != "static":
         assert live.last_allocation is not None
         assert replay.last_allocation == live.last_allocation
