@@ -57,12 +57,23 @@ VARIANTS: dict[str, dict[str, Any]] = {
     # documenté existe, et beaucoup moins de bruit de rebalancement.
     "seance": {"allocation.method": "risk_parity", "decision.include_alpha": False,
                "allocation.rebalance_timeframe": "session"},
+    # Même part de risque par classe d'actifs (constraints.sectors).
+    "classes": {"allocation.method": "class_parity", "decision.include_alpha": False},
 }
 VARIANT_LABELS = {
     "complet": "Moteur complet (signaux + décision)",
     "sans_modeles": "Moteur sans modèles (risk parity + décision)",
     "seance": "Moteur sans modèles, 1 décision/séance",
+    "classes": "Moteur parité par classe d'actifs",
 }
+# Références à poids fixes, rebalancées chaque mois (calculées si leurs symboles
+# sont dans le dataset).
+FIXED_BENCHMARKS: tuple[tuple[str, dict[str, float]], ...] = (
+    ("60/40 SPY/TLT (mensuel)", {"SPY": 0.6, "TLT": 0.4}),
+    ("Actions mondiales (proxy ACWI : SPY 60, EFA 30, EEM 10)", {"SPY": 0.6, "EFA": 0.3, "EEM": 0.1}),
+    ("All-Weather (SPY 30, TLT 40, IEF 15, GLD 7,5, DBC 7,5)",
+     {"SPY": 0.30, "TLT": 0.40, "IEF": 0.15, "GLD": 0.075, "DBC": 0.075}),
+)
 COST_KEYS = ("execution.cost.default_spread_bps", "execution.cost.slippage_bps",
              "decision.default_spread_bps", "decision.slippage_bps")
 
@@ -305,10 +316,10 @@ def run_backtest(
         monthly_inverse_vol(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash),
     ]
 
-    sixty_forty = monthly_fixed("60/40 SPY/TLT (mensuel)", days, prices, {"SPY": 0.6, "TLT": 0.4},
-                                cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash)
-    if sixty_forty is not None:
-        benchmarks.append(sixty_forty)
+    for name, weights in FIXED_BENCHMARKS:
+        b = monthly_fixed(name, days, prices, weights, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash)
+        if b is not None:
+            benchmarks.append(b)
 
     rows = [row(b, eval_start, eval_end, fx) for b in benchmarks]
     walk = []
@@ -332,9 +343,8 @@ def run_backtest(
         bps = cost_bps * cost_stress
         stressed = [buy_and_hold(days, prices, cash=cash, cost_bps=bps, tax=tax, min_cash=min_cash),
                     monthly_inverse_vol(days, prices, cash=cash, cost_bps=bps, tax=tax, min_cash=min_cash)]
-        if sixty_forty is not None:
-            stressed.append(monthly_fixed("60/40 SPY/TLT (mensuel)", days, prices, {"SPY": 0.6, "TLT": 0.4},
-                                          cash=cash, cost_bps=bps, tax=tax, min_cash=min_cash))
+        stressed += [b for b in (monthly_fixed(name, days, prices, w, cash=cash, cost_bps=bps, tax=tax,
+                                               min_cash=min_cash) for name, w in FIXED_BENCHMARKS) if b is not None]
         for b in stressed:
             b.name += f" [coûts ×{cost_stress:g}]"
             stress_rows.append(row(b, eval_start, eval_end, fx))

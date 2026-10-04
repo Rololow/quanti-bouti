@@ -1,0 +1,16 @@
+# Surcouche : univers élargi, trois classes d'actifs (ETF US cotés depuis 2006).
+#   actions       : SPY (US), EFA (pays développés hors US), EEM (émergents)
+#   obligations   : TLT (Treasuries 20 ans+), IEF (7-10 ans), TIP (indexées inflation)
+#   matières prem.: GLD (or), DBC (panier diversifié)
+# Avec allocation.method: class_parity, chaque classe porte un tiers du risque :
+# les obligations ne dominent plus du seul fait de leur faible volatilité, et
+# trois ETF d'actions ne pèsent pas triple.
+
+feed:
+  symbols: [SPY, EFA, EEM, TLT, IEF, TIP, GLD, DBC]
+
+allocation:
+  constraints:
+    sectors: {SPY: equity, EFA: equity, EEM: equity, TLT: bonds, IEF: bonds, TIP: bonds,
+              GLD: commodities, DBC: commodities}
+    sector_limits: {equity: 0.60}

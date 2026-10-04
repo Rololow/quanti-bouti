@@ -95,7 +95,7 @@ class BaselineConfig:
     max_weight: float = 0.40
 
 
-ALLOCATION_METHODS = ("static", "baseline", "risk_parity", "hrp", "signal")
+ALLOCATION_METHODS = ("static", "baseline", "risk_parity", "hrp", "signal", "class_parity")
 
 
 @dataclass(frozen=True)

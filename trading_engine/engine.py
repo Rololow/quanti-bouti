@@ -156,7 +156,8 @@ class Engine:
         self.baseline = BaselineAllocator(**vars(alloc.baseline)) if alloc.method == "baseline" else None
         self.allocator = (
             RiskAllocator(alloc.method, target_vol=alloc.target_vol,
-                          max_gross=alloc.constraints.max_gross, min_skill=alloc.min_skill)
+                          max_gross=alloc.constraints.max_gross, min_skill=alloc.min_skill,
+                          classes=alloc.constraints.sectors)
             if alloc.method not in ("static", "baseline") else None
         )
         self.constraints = ConstraintEngine(alloc.constraints)

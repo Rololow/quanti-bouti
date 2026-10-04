@@ -17,3 +17,13 @@ instruments:
   QQQ: {asset_class: etf, domicile: IE, distribution: accumulating, fund_withholding: 0.15}
   TLT: {asset_class: etf, domicile: IE, distribution: accumulating, bond_share: 1.0}
   GLD: {asset_class: etf, domicile: IE, distribution: accumulating}
+  # Univers élargi — équivalents UCITS (IE, capitalisants) :
+  # EFA ≈ IMEU/SWDA hors US, EEM ≈ EIMI, IEF ≈ CBU7, TIP ≈ ITPS, DBC ≈ ICOM.
+  # Retenues au niveau du fonds approximatives (varient selon les pays).
+  EFA: {asset_class: etf, domicile: IE, distribution: accumulating, fund_withholding: 0.15}
+  EEM: {asset_class: etf, domicile: IE, distribution: accumulating, fund_withholding: 0.10}
+  IEF: {asset_class: etf, domicile: IE, distribution: accumulating, bond_share: 1.0}
+  TIP: {asset_class: etf, domicile: IE, distribution: accumulating, bond_share: 1.0}
+  # Matières premières par swap : collatéral en T-bills, statut Reynders
+  # incertain (à vérifier) ; pas de distribution.
+  DBC: {asset_class: etf, domicile: IE, distribution: accumulating}
