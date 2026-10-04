@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     dd.add_argument("--symbols")
     dd.add_argument("--source", choices=["yahoo", "stooq"], default="yahoo")
     dd.add_argument("--no-fx", action="store_true", help="ne pas télécharger les taux BCE")
+    dd.add_argument("--net-dividends", action="store_true",
+                    help="réinvestir les dividendes nets d'impôts (profil fiscal et instruments de la config)")
     dd.add_argument("--out", default="data/backtest/daily.jsonl")
 
     imp = sub.add_parser("import-csv", help="CSV quotidiens (Stooq, Yahoo) -> dataset 1d")
@@ -73,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     imp.add_argument("--start", type=_date)
     imp.add_argument("--end", type=_date)
     imp.add_argument("--no-fx", action="store_true", help="ne pas télécharger les taux BCE")
+    imp.add_argument("--net-dividends", action="store_true",
+                     help="réinvestir les dividendes nets d'impôts (profil fiscal et instruments de la config)")
     imp.add_argument("--out", default="data/backtest/daily.jsonl")
 
     run = sub.add_parser("run", help="lance le backtest")
@@ -121,7 +125,16 @@ def main(argv: list[str] | None = None) -> int:
                 if not file:
                     parser.error(f"expected SYMBOLE=chemin.csv, got {item!r}")
                 files[sym.strip().upper()] = file
-        summary = import_daily_csv(files, out, start=args.start, end=args.end)
+        keep = None
+        if args.net_dividends:
+            from trading_engine.tax.profile import load_tax_profile
+            from trading_engine.tax.tax_model import TaxModel
+
+            if not cfg.tax.profile:
+                parser.error("--net-dividends requires tax.profile in the config")
+            model = TaxModel(load_tax_profile(resolve_path(cfg.tax.profile)), cfg.instruments)
+            keep = {sym: model.distribution_keep(sym) for sym in files}
+        summary = import_daily_csv(files, out, start=args.start, end=args.end, keep=keep)
         if not summary["bars"]:
             print(summary)
             return 1

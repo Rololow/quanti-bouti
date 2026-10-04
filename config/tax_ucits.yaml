@@ -1,0 +1,19 @@
+# Surcouche fiscale : équivalents UCITS irlandais de CAPITALISATION des ETF US
+# (CSPX ≈ SPY, EQQQ/CNDX ≈ QQQ, IDTL ≈ TLT, SGLN ≈ GLD), la voie habituelle
+# d'un particulier belge (les ETF US n'ont pas de KID PRIIPs). Les prix des
+# ETF US servent de proxy (frais un peu différents).
+#
+# Effets fiscaux (profil BE, à faire vérifier) :
+# - TOB 0,12 % (ETF de l'EEE) au lieu de 0,35 % ;
+# - pas de précompte : les revenus sont réinvestis dans le fonds ;
+# - le fonds irlandais subit 15 % de retenue US sur les dividendes d'actions
+#   (les intérêts des Treasuries en sont exemptés) ;
+# - fonds obligataire (> 10 % de créances) : taxe Reynders de 30 % sur la
+#   composante intérêts à la revente, comptée ici chaque année (prudent) ;
+# - SGLN est un ETC (titre de dette adossé à de l'or), pas un fonds : ni
+#   revenus ni Reynders ; TOB et taxe sur les plus-values seulement.
+instruments:
+  SPY: {asset_class: etf, domicile: IE, distribution: accumulating, fund_withholding: 0.15}
+  QQQ: {asset_class: etf, domicile: IE, distribution: accumulating, fund_withholding: 0.15}
+  TLT: {asset_class: etf, domicile: IE, distribution: accumulating, bond_share: 1.0}
+  GLD: {asset_class: etf, domicile: IE, distribution: accumulating}

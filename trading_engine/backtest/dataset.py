@@ -20,7 +20,7 @@ import json
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import AsyncIterator, Callable, Iterable, Iterator
+from typing import AsyncIterator, Callable, Iterable, Iterator, Mapping
 
 from trading_engine.data.alpaca_history import AlpacaHistoricalClient
 from trading_engine.data.calendar import NY, MarketCalendar
@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 # Position des trades synthétiques dans la barre (fraction de sa durée).
 TRADE_OFFSETS = (0.0, 0.25, 0.5, 0.9)
+
+
+def meta_path(dataset: str | Path) -> Path:
+    """Description du dataset (traitement des dividendes)."""
+    dataset = Path(dataset)
+    return dataset.with_name(dataset.name + ".meta.json")
 
 
 def fx_path(dataset: str | Path) -> Path:
@@ -218,7 +224,7 @@ def write_synthetic_dataset(
 
 
 def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: date | None = None,
-                     end: date | None = None) -> dict:
+                     end: date | None = None, keep: Mapping[str, float] | None = None) -> dict:
     """CSV quotidiens (un par symbole) -> dataset de barres 1d sur les séances NYSE.
 
     Colonnes reconnues (casse ignorée) : Date, Open, High, Low, Close, Volume
@@ -226,11 +232,18 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
     Adj Close / Close (dividendes réinvestis, comme `adjustment=all`).
     Format Stooq (`Date,Open,High,Low,Close,Volume`) et Yahoo acceptés.
     Une barre couvre la séance (ouverture -> clôture, 13h00 les veilles de fête).
+
+    `keep` ({symbole: part gardée}) : avec une colonne `Dividend`, les
+    distributions sont réinvesties **nettes** d'impôts (indice de rendement
+    total : I_t = I_{t-1} × (C_t + keep × D_t) / C_{t-1}) au lieu de l'Adj Close
+    qui les réinvestit brutes.
     """
     import csv
 
     bars: list[BarEvent] = []
     skipped: dict[str, int] = {}
+    net_keep: dict[str, float | None] = {}
+    div_totals: dict[str, float] = {}
     for sym, file in sorted(files.items()):
         with open(file, encoding="utf-8-sig", newline="") as fh:
             reader = csv.DictReader(fh)
@@ -239,10 +252,17 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
             if missing:
                 raise ValueError(f"{file}: missing columns {missing}")
             rows = list(reader)
+        rows.sort(key=lambda r: r[cols["date"]].strip()[:10])
         days = [date.fromisoformat(r[cols["date"]].strip()[:10]) for r in rows]
         if not days:
             continue
+        net = keep is not None and sym in keep
+        if net and ("dividend" not in cols or not any((r[cols["dividend"]] or "").strip() for r in rows)):
+            # Ex. Stooq : pas de dividendes du tout -> un « net » serait trompeur.
+            raise ValueError(f"{file}: net dividends requested but no Dividend column or no dividend data")
+        net_keep[sym] = keep[sym] if net else None
         calendar = MarketCalendar.from_rules(min(days), max(days))
+        index = prev_close = None
         for r, day in zip(rows, days):
             if (start and day < start) or (end and day > end):
                 continue
@@ -250,6 +270,7 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
                 o, h, low, c = (float(r[cols[k]]) for k in ("open", "high", "low", "close"))
                 v = float(r[cols["volume"]]) if "volume" in cols and r[cols["volume"]] not in ("", None) else 0.0
                 adj = float(r[cols["adj close"]]) if "adj close" in cols and r[cols["adj close"]] else c
+                div = float(r[cols["dividend"]] or 0.0) if "dividend" in cols else 0.0
             except ValueError:
                 skipped[sym] = skipped.get(sym, 0) + 1         # « null », ligne incomplète
                 continue
@@ -257,6 +278,10 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
             if session is None or min(o, h, low, c) <= 0 or c <= 0:
                 skipped[sym] = skipped.get(sym, 0) + 1
                 continue
+            if net:
+                index = c if index is None else index * (c + keep[sym] * div) / prev_close
+                prev_close, adj = c, index
+                div_totals[sym] = div_totals.get(sym, 0.0) + div
             k = adj / c
             o, h, low, c = o * k, max(o, h, low, c) * k, min(o, h, low, c) * k, adj
             bars.append(BarEvent(timestamp=session.open, end=session.close, received_at=session.close, symbol=sym,
@@ -268,7 +293,9 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
     with EventLogWriter(path) as writer:
         for bar in bars:
             writer.write(bar)
-    return {"path": str(path), "bars": len(bars), "skipped": skipped,
+    meta = {"dividends": "net" if keep is not None else "gross (Adj Close)", "keep": net_keep}
+    meta_path(path).write_text(json.dumps(meta), encoding="utf-8")
+    return {"path": str(path), "bars": len(bars), "skipped": skipped, **meta, "dividend_totals": div_totals,
             "per_symbol": {s: sum(1 for b in bars if b.symbol == s) for s in files},
             "start": bars[0].timestamp.date().isoformat() if bars else None,
             "end": bars[-1].timestamp.date().isoformat() if bars else None}

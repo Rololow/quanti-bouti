@@ -50,7 +50,10 @@ allocation:
   #   hrp         : hierarchical risk parity
   #   signal      : budgets de risque issus des signaux (pondérés par le skill
   #                 du modèle) + risk parity
-  method: static
+  # Défaut : risk_parity. Le backtest 2006-2026 (données réelles) montre que
+  # les modèles (signal) n'apportent rien ; ils restent disponibles pour la
+  # recherche mais ne doivent être activés qu'avec une preuve backtestée.
+  method: risk_parity
   # Recalcul de la cible (et du rapport de risque) à chaque barre de ce timeframe.
   rebalance_timeframe: 1h
   target_vol: 0.10       # volatilité annualisée visée
@@ -145,7 +148,7 @@ decision:
   commission_per_order: 0.0
   min_robustness: 0.3       # stress tests : en dessous, cible jugée non fiable
   min_data_score: 0.9
-  include_alpha: true
+  include_alpha: false     # pas d'alpha des modèles tant qu'il n'est pas prouvé
 
 execution:
   # off | proposals | paper | alpaca_paper — aucun compte réel n'est JAMAIS utilisé.
@@ -311,7 +314,7 @@ fx:
 instruments:
   SPY: {asset_class: etf, domicile: US, distribution: distributing}
   QQQ: {asset_class: etf, domicile: US, distribution: distributing}
-  TLT: {asset_class: etf, domicile: US, distribution: distributing}
+  TLT: {asset_class: etf, domicile: US, distribution: distributing, bond_share: 1.0}
   GLD: {asset_class: etf, domicile: US, distribution: accumulating}
 
 storage:

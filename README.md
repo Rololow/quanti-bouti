@@ -126,6 +126,32 @@ config, versions). La variante « 1 décision/séance »
 (`allocation.rebalance_timeframe: session`) décide une fois par séance au
 lieu de chaque heure.
 
+**Après impôts belges.** Par défaut, les prix « Adj Close » réinvestissent les
+dividendes *bruts*, ce qui avantage les stratégies riches en obligations
+(TLT distribue ~3 %/an). Avec `--net-dividends`, seuls les dividendes nets
+sont réinvestis, d'après le profil fiscal et le véhicule de chaque instrument
+(`distribution_keep`) :
+
+| Véhicule | Part gardée d'un dividende | TOB |
+|---|---|---|
+| ETF US distribuant (config par défaut) | 85 % (retenue US) × 70 % (précompte) = 59,5 % | 0,35 % |
+| UCITS irlandais capitalisant (`config/tax_ucits.yaml`) | actions 85 % (retenue au niveau du fonds), obligations 70 % (Reynders, compté chaque année) | 0,12 % |
+
+```bash
+python -m trading_engine.backtest import-csv SPY=... --net-dividends --out data/backtest/daily_us.jsonl
+python -m trading_engine.backtest --overlay config/tax_ucits.yaml import-csv SPY=... --net-dividends --out data/backtest/daily_ucits.jsonl
+python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay config/tax_ucits.yaml run --data data/backtest/daily_ucits.jsonl
+```
+
+Le workflow **backtest** lance les deux scénarios. Les ETF US ne sont en
+général pas accessibles aux particuliers européens (pas de KID PRIIPs) : les
+UCITS irlandais sont la voie habituelle. Profil fiscal à faire vérifier.
+
+**Config par défaut : risk parity sans alpha** (`allocation.method:
+risk_parity`, `decision.include_alpha: false`). Sur 2006-2026, le moteur avec
+modèles reste quasi en cash et n'apporte rien ; les modèles restent
+disponibles pour la recherche.
+
 La config du backtest est `config/config.yaml` + la surcouche
 `config/backtest.yaml` (réglages 5m remplacés par 30m/1h, départ en cash).
 Le rapport (`data/backtest/report.json` et `.md`) donne, sur la fenêtre
