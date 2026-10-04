@@ -33,6 +33,9 @@ class Instrument:
     distribution: str | None = None     # distributing | accumulating
     registered_locally: bool = False    # offert publiquement dans le pays du profil
     bond_share: float = 0.0             # part investie en créances (fonds)
+    # Retenue subie par le fonds lui-même sur ses revenus (ex. ETF irlandais
+    # détenant des actions US : 15 %), avant toute fiscalité de l'investisseur.
+    fund_withholding: float = 0.0
 
 
 @dataclass(frozen=True)

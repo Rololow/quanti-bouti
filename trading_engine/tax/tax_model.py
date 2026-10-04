@@ -192,6 +192,30 @@ class TaxModel:
         local = (gross - foreign) * inc.dividend_rate
         return DividendTax(gross, foreign, local)
 
+    def distribution_keep(self, symbol: str) -> float:
+        """Part d'une distribution (dividende, coupon) que l'investisseur garde
+        et peut réinvestir, après les impôts sur les revenus.
+
+        - distribuant : retenue du fonds, retenue du pays de domicile, puis
+          précompte local ;
+        - capitalisant : pas de précompte ; seule la retenue du fonds reste,
+          plus la taxe sur la composante intérêts (ex. Reynders) si le fonds
+          dépasse le seuil de créances. Elle n'est due qu'à la revente :
+          l'appliquer chaque année est prudent (pas d'effet du report).
+
+        L'exonération annuelle de dividendes (petits montants) est ignorée.
+        """
+        inst = self.instrument(symbol)
+        inc = self.profile.income
+        keep = 1.0 - inst.fund_withholding
+        if inst.distribution == "accumulating":
+            if inst.bond_share > inc.interest_component_threshold:
+                keep *= 1.0 - inc.interest_component_rate * min(inst.bond_share, 1.0)
+            return keep
+        if inst.domicile and inst.domicile != self.profile.country:
+            keep *= 1.0 - inc.foreign_withholding.get(inst.domicile, inc.foreign_withholding.get("default", 0.0))
+        return keep * (1.0 - inc.dividend_rate)
+
     # ------------------------------------------------------------- estimation
 
     def rebalance_cost(

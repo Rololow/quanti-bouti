@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 STOOQ_URL = "https://stooq.com/q/d/l/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (quanti-bouti backtest)", "Accept": "application/json,text/csv"}
-FIELDS = ("Date", "Open", "High", "Low", "Close", "Adj Close", "Volume")
+FIELDS = ("Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "Dividend")
 
 
 def _get(url: str) -> str:
@@ -52,13 +52,18 @@ def yahoo_daily(symbol: str, start: date, end: date, *, http_get: Callable[[str]
         raise LookupError(f"Yahoo {symbol}: no data between {start} and {end}")
     quote = result["indicators"]["quote"][0]
     adj = ((result["indicators"].get("adjclose") or [{}])[0]).get("adjclose") or quote["close"]
+    to_day = lambda ts: datetime.fromtimestamp(int(ts), timezone.utc).astimezone(NY).date()  # noqa: E731
+    dividends: dict[date, float] = {}
+    for ev in ((result.get("events") or {}).get("dividends") or {}).values():
+        day = to_day(ev["date"])
+        dividends[day] = dividends.get(day, 0.0) + float(ev["amount"])
     rows = []
     for i, ts in enumerate(result["timestamp"]):
         values = [quote["open"][i], quote["high"][i], quote["low"][i], quote["close"][i], adj[i]]
         if any(v is None for v in values):
             continue                                    # jour sans cotation (null)
-        day = datetime.fromtimestamp(ts, timezone.utc).astimezone(NY).date()
-        rows.append(dict(zip(FIELDS, [day.isoformat(), *values, quote["volume"][i] or 0])))
+        day = to_day(ts)
+        rows.append(dict(zip(FIELDS, [day.isoformat(), *values, quote["volume"][i] or 0, dividends.get(day, 0.0)])))
     return rows
 
 
@@ -69,8 +74,9 @@ def stooq_daily(symbol: str, start: date, end: date, *, http_get: Callable[[str]
     rows = [r for r in csv.DictReader(io.StringIO(text)) if r.get("Date") and r.get("Close")]
     if not rows:
         raise LookupError(f"Stooq {symbol}: no data ({text[:80]!r})")
+    # Pas de dividendes chez Stooq : ni net ni brut, prix seuls (voir README).
     return [{"Date": r["Date"], "Open": r["Open"], "High": r["High"], "Low": r["Low"], "Close": r["Close"],
-             "Adj Close": r["Close"], "Volume": r.get("Volume") or 0} for r in rows]
+             "Adj Close": r["Close"], "Volume": r.get("Volume") or 0, "Dividend": ""} for r in rows]
 
 
 SOURCES = {"yahoo": yahoo_daily, "stooq": stooq_daily}

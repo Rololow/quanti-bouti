@@ -322,7 +322,7 @@ def test_yahoo_and_stooq_parsers():
 
     rows = yahoo_daily("SPY", date(2025, 3, 1), date(2025, 3, 5), http_get=fake)
     assert rows == [{"Date": "2025-03-03", "Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5,
-                     "Adj Close": 1.2, "Volume": 10}]
+                     "Adj Close": 1.2, "Volume": 10, "Dividend": 0.0}]
     assert "query1.finance.yahoo.com/v8/finance/chart/SPY" in urls[0] and "interval=1d" in urls[0]
     with pytest.raises(LookupError):
         yahoo_daily("X", date(2025, 3, 1), date(2025, 3, 5),
@@ -364,3 +364,62 @@ def test_session_rebalancing_decides_once_per_session():
     assert len(e.decisions) == 2 and all(s is not None for s in sessions)
     assert len({s.day for s in sessions}) == 2
     assert all(d.timestamp >= s.open + timedelta(minutes=5) for d, s in zip(e.decisions, sessions))
+
+
+# ------------------------------------------------------------------ dividendes nets d'impôts belges
+
+def test_distribution_keep_by_vehicle():
+    from trading_engine.tax.profile import load_tax_profile
+    from trading_engine.tax.tax_model import TaxModel
+    from trading_engine.config import resolve_path
+    for overlays, expected in (((), {"SPY": 0.595, "TLT": 0.595, "GLD": 1.0}),
+                               ((PROJECT_ROOT / "config" / "tax_ucits.yaml",), {"SPY": 0.85, "TLT": 0.70, "GLD": 1.0})):
+        cfg = load_config(DEFAULT_CONFIG_PATH, overlays)
+        model = TaxModel(load_tax_profile(resolve_path(cfg.tax.profile)), cfg.instruments)
+        assert {s: round(model.distribution_keep(s), 3) for s in expected} == expected
+
+
+def test_yahoo_dividends_are_parsed():
+    t1 = int(datetime(2025, 3, 3, 14, 30, tzinfo=UTC).timestamp())
+    t2 = t1 + 86400
+    payload = {"chart": {"error": None, "result": [{
+        "timestamp": [t1, t2],
+        "events": {"dividends": {str(t2): {"amount": 0.5, "date": t2}}},
+        "indicators": {"quote": [{"open": [10.0, 10.0], "high": [10.0, 10.0], "low": [10.0, 10.0],
+                                  "close": [10.0, 10.0], "volume": [1, 1]}],
+                       "adjclose": [{"adjclose": [9.52, 10.0]}]}}]}}
+    rows = yahoo_daily("SPY", date(2025, 3, 1), date(2025, 3, 5), http_get=lambda u: json.dumps(payload))
+    assert [r["Dividend"] for r in rows] == [0.0, 0.5]
+
+
+def test_net_dividends_reinvest_only_what_is_kept(tmp_path):
+    f = tmp_path / "x.csv"
+    # prix constant à 100, dividende de 2 le 2e jour : brut +2 %, net (59,5 %) +1,19 %
+    f.write_text("Date,Open,High,Low,Close,Adj Close,Volume,Dividend\n"
+                 "2025-03-03,100,100,100,100,98.04,10,0\n"
+                 "2025-03-04,100,100,100,100,100,10,2\n"
+                 "2025-03-05,100,100,100,100,100,10,0\n", encoding="utf-8")
+    gross = tmp_path / "gross.jsonl"
+    net = tmp_path / "net.jsonl"
+    import_daily_csv({"SPY": f}, gross)
+    s = import_daily_csv({"SPY": f}, net, keep={"SPY": 0.595})
+    g = [b.close for b in read_events(gross)]
+    n = [b.close for b in read_events(net)]
+    assert g[1] / g[0] == pytest.approx(100 / 98.04)
+    assert n[1] / n[0] == pytest.approx(1 + 0.595 * 0.02) and n[2] == pytest.approx(n[1])
+    assert s["dividends"] == "net" and s["dividend_totals"] == {"SPY": 2.0}
+    meta = json.loads((tmp_path / "net.jsonl.meta.json").read_text(encoding="utf-8"))
+    assert meta["keep"] == {"SPY": 0.595}
+    # keep = 1 : même rendement que l'Adj Close (au facteur d'échelle près)
+    full = tmp_path / "full.jsonl"
+    import_daily_csv({"SPY": f}, full, keep={"SPY": 1.0})
+    fl = [b.close for b in read_events(full)]
+    assert fl[1] / fl[0] == pytest.approx(1.02)
+    no_div = tmp_path / "nodiv.csv"
+    no_div.write_text("Date,Open,High,Low,Close,Volume\n2025-03-03,1,1,1,1,1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no Dividend column"):
+        import_daily_csv({"SPY": no_div}, tmp_path / "z.jsonl", keep={"SPY": 0.5})
+    empty = tmp_path / "stooq.csv"                    # colonne présente mais vide (Stooq)
+    empty.write_text("Date,Open,High,Low,Close,Volume,Dividend\n2025-03-03,1,1,1,1,1,\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no dividend data"):
+        import_daily_csv({"SPY": empty}, tmp_path / "e.jsonl", keep={"SPY": 0.5})

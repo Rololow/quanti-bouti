@@ -38,7 +38,7 @@ from trading_engine.backtest.benchmarks import (
     monthly_fixed,
     monthly_inverse_vol,
 )
-from trading_engine.backtest.dataset import fx_path, read_closes
+from trading_engine.backtest.dataset import fx_path, meta_path, read_closes
 from trading_engine.config import Config, load_config, resolve_path
 from trading_engine.data.calendar import NY
 from trading_engine.data.events import EventType
@@ -270,6 +270,8 @@ def run_backtest(
     if eval_start >= eval_end:
         raise ValueError(f"evaluation window is empty ({eval_start} >= {eval_end})")
     fx = load_fx(cfg, dataset)
+    meta = meta_path(dataset)
+    dividends = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else None
 
     def job(v, params, fixed, name, variant_kind):
         return {"config": str(config), "overlays": [str(o) for o in overlays], "dataset": str(dataset),
@@ -356,11 +358,22 @@ def run_backtest(
         "currency": cfg.fx.portfolio_currency, "initial_cash": cash, "rows": rows, "walk_forward": walk,
         "cost_stress": {"multiplier": cost_stress, "rows": stress_rows} if stress_rows else None,
         "crises": [{"name": n, "start": a, "end": b} for n, a, b in stats.CRISES if b >= eval_start and a <= eval_end],
+        "dividends": dividends,
         "provenance": provenance(dataset, config, overlays, grid, variants, cost_stress),
-        "caveats": (CAVEATS if fx is None or fx.source != "fixed" else
-                    [f"Taux BCE indisponibles : EUR/USD fixe {cfg.fx.fixed_rate} — les colonnes EUR et la TOB "
-                     "ne reflètent pas le vrai change."] + CAVEATS),
+        "caveats": caveats(cfg, fx, dividends),
     }
+
+
+def caveats(cfg: Config, fx: FxRates | None, dividends: dict | None) -> list[str]:
+    out = list(CAVEATS)
+    if dividends and dividends.get("dividends") == "net":
+        keep = ", ".join(f"{s} {k:.0%}" for s, k in sorted((dividends.get("keep") or {}).items()) if k is not None)
+        out[2] = (f"Dividendes réinvestis NETS d'impôts sur les revenus (part gardée : {keep}) ; "
+                  "exonération annuelle des petits dividendes ignorée.")
+    if fx is not None and fx.source == "fixed":
+        out.insert(0, f"Taux BCE indisponibles : EUR/USD fixe {cfg.fx.fixed_rate} — les colonnes EUR et la TOB "
+                      "ne reflètent pas le vrai change.")
+    return out
 
 
 def _get_path(cfg: Any, key: str) -> Any:
@@ -471,7 +484,8 @@ def format_report(report: dict) -> str:
         f"Backtest {report['symbols']} — données {report['bars_start']} → {report['bars_end']}, "
         f"évaluation {report['eval_start']} → {report['eval_end']}",
         f"Capital initial {report['initial_cash']:,.0f} {ccy} ; change : "
-        f"{(report['fx'] or {}).get('source', 'aucun')}",
+        f"{(report['fx'] or {}).get('source', 'aucun')} ; dividendes : "
+        f"{(report.get('dividends') or {}).get('dividends', 'prix ajustés bruts')}",
         "", "## Résultats", "", header,
     ]
     lines += [_row_line(r) for r in report["rows"]]

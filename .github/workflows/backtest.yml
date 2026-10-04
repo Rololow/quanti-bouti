@@ -20,7 +20,7 @@ on:
         default: "decision.holding_period=20d,60d,120d"
       variants:
         description: "Variantes du moteur"
-        default: "complet,sans_modeles"
+        default: "sans_modeles"
   schedule:
     - cron: "17 6 * * 1"
   pull_request:
@@ -45,7 +45,7 @@ jobs:
       START: ${{ inputs.start || '2005-01-01' }}
       SYMBOLS: ${{ inputs.symbols || '' }}
       GRID: ${{ inputs.grid || 'decision.holding_period=20d,60d,120d' }}
-      VARIANTS: ${{ inputs.variants || 'complet,sans_modeles' }}
+      VARIANTS: ${{ inputs.variants || 'sans_modeles' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,8 +58,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/backtest
-          key: daily-${{ env.START }}-${{ env.SYMBOLS }}-${{ github.run_id }}
-          restore-keys: daily-${{ env.START }}-${{ env.SYMBOLS }}-
+          key: daily-v2-${{ env.START }}-${{ env.SYMBOLS }}-${{ github.run_id }}
+          restore-keys: daily-v2-${{ env.START }}-${{ env.SYMBOLS }}-
       - name: Données quotidiennes
         run: |
           set -o pipefail
@@ -71,20 +71,44 @@ jobs:
             python -m trading_engine.backtest download-daily "${args[@]}" --source yahoo \
               || python -m trading_engine.backtest download-daily "${args[@]}" --source stooq
           fi
-      - name: Backtest
+      - name: Datasets après impôts belges (dividendes nets)
+        run: |
+          dir=data/backtest/csv_yahoo
+          files=()
+          for f in "$dir"/*.csv; do files+=("$(basename "$f" .csv)=$f"); done
+          python -m trading_engine.backtest import-csv "${files[@]}" --net-dividends --no-fx \
+            --out data/backtest/daily_us.jsonl
+          python -m trading_engine.backtest --overlay config/tax_ucits.yaml import-csv "${files[@]}" \
+            --net-dividends --no-fx --out data/backtest/daily_ucits.jsonl
+          for d in daily_us daily_ucits; do
+            if [ -f data/backtest/daily.jsonl.fx.json ]; then
+              cp data/backtest/daily.jsonl.fx.json "data/backtest/$d.jsonl.fx.json"
+            fi
+          done
+      - name: Backtest — ETF US distribuants (précompte 30 %, TOB 0,35 %)
         run: |
           python -m trading_engine.backtest --overlay config/backtest_daily.yaml run \
-            --data data/backtest/daily.jsonl --grid "$GRID" --variants "$VARIANTS" \
-            --out data/backtest/report.json
-      - name: Rapport dans le résumé
+            --data data/backtest/daily_us.jsonl --grid "$GRID" --variants "$VARIANTS" \
+            --out data/backtest/report_us.json
+      - name: Backtest — UCITS capitalisants (Reynders, TOB 0,12 %)
+        run: |
+          python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay config/tax_ucits.yaml run \
+            --data data/backtest/daily_ucits.jsonl --grid "$GRID" --variants "$VARIANTS" \
+            --out data/backtest/report_ucits.json
+      - name: Rapports dans le résumé
         if: always()
         run: |
-          if [ -f data/backtest/report.md ]; then cat data/backtest/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+          for r in us:"ETF US distribuants" ucits:"UCITS irlandais de capitalisation"; do
+            f="data/backtest/report_${r%%:*}.md"
+            if [ -f "$f" ]; then
+              { echo "# Scénario fiscal : ${r#*:}"; echo; cat "$f"; echo; } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: backtest-report
           path: |
-            data/backtest/report.md
-            data/backtest/report.json
+            data/backtest/report_*.md
+            data/backtest/report_*.json
           if-no-files-found: ignore
