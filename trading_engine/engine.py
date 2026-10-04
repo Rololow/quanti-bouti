@@ -20,7 +20,7 @@ import numpy as np
 from trading_engine.alerts.alerts import Alert, AlertEngine
 from trading_engine.allocation.allocator import RiskAllocator
 from trading_engine.allocation.baseline import BaselineAllocator
-from trading_engine.allocation.constraints import ConstraintEngine, fit_gross_after_freeze
+from trading_engine.allocation.constraints import ConstraintEngine, fit_gross_after_freeze, gross_cap_of
 from trading_engine.allocation.drift import DriftMonitor, DriftReport
 from trading_engine.allocation.types import TargetAllocation
 from trading_engine.config import Config, resolve_path
@@ -71,9 +71,10 @@ from trading_engine.execution.alpaca_trading import (
 from trading_engine.execution.paper_broker import PaperBroker
 from trading_engine.data.alpaca_history import AlpacaHistoricalClient
 from trading_engine.data.events import CalendarEvent, OrderUpdateEvent, PortfolioEvent
-from trading_engine.data.events import FxEvent, TaxLedgerEvent
+from trading_engine.data.events import FxEvent, RatesEvent, TaxLedgerEvent
+from trading_engine.portfolio.financing import RateSeries, accrue
 from trading_engine.tax.fx import FxRates, fetch_ecb_rates
-from trading_engine.backtest.dataset import BarDatasetFeed, fx_path as dataset_fx_path
+from trading_engine.backtest.dataset import BarDatasetFeed, fx_path as dataset_fx_path, rates_path as dataset_rates_path
 from trading_engine.data.calendar import NY, MarketCalendar
 from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import portfolio_vol
@@ -157,7 +158,7 @@ class Engine:
         self.allocator = (
             RiskAllocator(alloc.method, target_vol=alloc.target_vol,
                           max_gross=alloc.constraints.max_gross, min_skill=alloc.min_skill,
-                          classes=alloc.constraints.sectors)
+                          classes=alloc.constraints.sectors, class_budgets=alloc.class_budgets)
             if alloc.method not in ("static", "baseline") else None
         )
         self.constraints = ConstraintEngine(alloc.constraints)
@@ -201,6 +202,10 @@ class Engine:
         self.market_block: str | None = None  # raison de ne pas trader au dernier intervalle
         self._bootstrapped = False
         self._last_session_decision: date | None = None
+        self.rates: RateSeries | None = None
+        self._accrued_until: date | None = None
+        self.interest_earned = 0.0           # devise du portefeuille
+        self.financing_cost = 0.0
         self.fx: FxRates | None = None
         self._fx_attempt: datetime | None = None
         # Registre fiscal persistant seulement avec un compte broker réel (paper
@@ -246,6 +251,7 @@ class Engine:
         self.bus.subscribe(EventType.CALENDAR, self._on_calendar)
         self.bus.subscribe(EventType.FX, self._on_fx)
         self.bus.subscribe(EventType.TAX_LEDGER, self._on_tax_ledger)
+        self.bus.subscribe(EventType.RATES, self._on_rates)
 
     def _build_tax_model(self) -> TaxModel | None:
         if not self.config.tax.profile:
@@ -400,6 +406,8 @@ class Engine:
             self.fundamentals.store.add(fact)
 
     async def _on_trade(self, event: TradeEvent) -> None:
+        if self.rates is not None:
+            self._accrue_financing(event.timestamp)
         self.market_state.update(event)
         self.portfolio.update_price(event.symbol, event.price, event.timestamp)
         self.risk.on_price(event.symbol, event.price, event.timestamp)
@@ -564,7 +572,10 @@ class Engine:
         # Achats plafonnés au cash disponible (hors cash minimum), sans compter
         # le produit des ventes qui pourraient ne pas être exécutées : pas de
         # levier involontaire. Les ventes passent en premier.
-        cash_available = state.cash - self.config.allocation.constraints.min_cash * state.total_value
+        c = self.config.allocation.constraints
+        # Avec levier (max_gross > 1), le pouvoir d'achat inclut l'emprunt autorisé.
+        borrowing = max(0.0, c.max_gross - 1.0) * state.total_value
+        cash_available = state.cash + borrowing - c.min_cash * state.total_value
         by_side = sorted(decision.symbols.items(), key=lambda kv: (kv[1].notional > 0, kv[0]))
         for sym, d in by_side:
             quote = self._quote(sym)
@@ -795,6 +806,8 @@ class Engine:
             await self._load_calendar(now)
         if self._fx_source():
             await self._load_fx(now)
+        if self.config.financing.enabled and self.remote_broker is None:
+            self._load_rates(now)
         await self._drain_injected()          # le registre a besoin des taux
         if self.tax is not None:
             self._load_ledger(now)
@@ -841,6 +854,40 @@ class Engine:
 
     def _dataset_fx_path(self):
         return dataset_fx_path(resolve_path(self.config.feed.dataset_path or "dataset"))
+
+    # ------------------------------------------------------------------ financement
+
+    def _load_rates(self, now: datetime) -> None:
+        path = dataset_rates_path(resolve_path(self.config.feed.dataset_path or "dataset"))
+        if self.config.feed.provider == "dataset" and path.exists():
+            with open(path, encoding="utf-8") as fh:
+                series = RateSeries.from_payload(json.load(fh))
+        else:
+            series = RateSeries.fixed(self.config.financing.fixed_rate, now.date() - timedelta(days=3650))
+        self._injected.append(RatesEvent(timestamp=now, received_at=now, symbol=None,
+                                         source=f"rates_{series.source}", payload=series.to_payload()))
+
+    def _on_rates(self, event: RatesEvent) -> None:
+        self.rates = RateSeries.from_payload(event.payload)
+
+    def _accrue_financing(self, ts: datetime) -> None:
+        """Intérêts du cash (et du levier) jusqu'au jour de `ts` (New York)."""
+        day = ts.astimezone(NY).date()
+        if self._accrued_until is None:
+            self._accrued_until = day
+            return
+        days = (day - self._accrued_until).days
+        if days <= 0:
+            return
+        f = self.config.financing
+        amount = accrue(self.portfolio.cash, self.rates.rate(self._accrued_until), days,
+                        borrow_spread=f.borrow_spread, credit_spread=f.credit_spread, credit_cash=f.credit_cash)
+        self.portfolio.cash += amount
+        if amount >= 0:
+            self.interest_earned += amount
+        else:
+            self.financing_cost -= amount
+        self._accrued_until = day
 
     def _on_fx(self, event: FxEvent) -> None:
         self.fx = FxRates.from_payload(event.payload)
@@ -1051,6 +1098,19 @@ class Engine:
         # Fraîcheur comptée depuis l'ouverture (pas depuis la clôture de la veille).
         return self.integrity.stale_symbols(now, since=session.open)
 
+    def _drawdown_scale(self) -> float:
+        """Grossman-Zhou : plancher = (1 - D) × plus haut ; exposition ∝ marge
+        au-dessus du plancher, normalisée à 1 au plus haut, 0 au plancher."""
+        limit = self.config.allocation.drawdown_control
+        if not limit:
+            return 1.0
+        dd = -min(0.0, self.risk.portfolio_drawdown.drawdown)
+        if dd >= limit:
+            scale = 0.0
+        else:
+            scale = (1.0 - (1.0 - limit) / (1.0 - dd)) / limit
+        return max(self.config.allocation.drawdown_min_scale, min(1.0, scale))
+
     def _reallocate(self, status: SafetyStatus) -> None:
         symbols = self.universe()
         cov = self.risk.covariance(symbols)
@@ -1064,6 +1124,11 @@ class Engine:
             requested, attribution, _ = self.allocator.allocate(symbols, cov, signals, None)
         else:
             return  # pas encore de covariance : on garde la cible actuelle
+        scale = self._drawdown_scale()
+        if scale < 1.0:
+            for sym in requested:
+                attribution.setdefault(sym, {})["drawdown_control"] = requested[sym] * (scale - 1.0)
+                requested[sym] *= scale
 
         current = {p.symbol: p.weight for p in self._raw_snapshot().positions}
 
@@ -1100,8 +1165,7 @@ class Engine:
             # Un symbole gelé au-dessus de sa cible ne libère pas son poids :
             # les autres ne doivent pas faire dépasser l'exposition maximale.
             c = self.config.allocation.constraints
-            fitted = fit_gross_after_freeze(weights, current, status.frozen_symbols,
-                                            min(c.max_gross, 1.0 - c.min_cash))
+            fitted = fit_gross_after_freeze(weights, current, status.frozen_symbols, gross_cap_of(c))
             for sym, w in fitted.items():
                 if w != weights[sym]:
                     attribution.setdefault(sym, {})["safety"] = \
@@ -1163,7 +1227,7 @@ class Engine:
             if self.integrity.check_bar(event) is None:
                 self._warmup_bar(event)
             return
-        if isinstance(event, (OrderUpdateEvent, PortfolioEvent, CalendarEvent, FxEvent, TaxLedgerEvent)):
+        if isinstance(event, (OrderUpdateEvent, PortfolioEvent, CalendarEvent, FxEvent, TaxLedgerEvent, RatesEvent)):
             # Événements du compte broker et calendrier : pas des données de
             # marché (ils ne doivent pas rafraîchir la fraîcheur d'un symbole).
             await self.bus.publish(event)

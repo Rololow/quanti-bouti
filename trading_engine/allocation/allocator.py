@@ -38,22 +38,34 @@ class RiskAllocator:
         max_gross: float = 1.0,
         min_skill: float = 0.0,
         classes: Mapping[str, str] | None = None,
+        class_budgets: Mapping[str, float] | None = None,
     ) -> None:
         if method not in METHODS:
             raise ValueError(f"unknown allocation method {method!r}, expected one of {METHODS}")
         self.method = method
         self.classes = dict(classes or {})
+        self.class_shares = dict(class_budgets or {})
         self.target_vol = target_vol
         self.max_gross = max_gross
         self.min_skill = min_skill
 
     def class_budgets(self, symbols: list[str]) -> np.ndarray:
-        """Parité par classe d'actifs : chaque classe reçoit la même part du
-        risque, partagée à égalité entre ses membres. Un symbole sans classe
-        forme sa propre classe."""
+        """Budgets de risque par classe d'actifs, partagés à égalité entre les
+        membres de chaque classe. Parts égales par défaut ; sinon `class_budgets`
+        (une classe absente de la table reçoit la part moyenne), renormalisées
+        sur les classes présentes. Un symbole sans classe forme sa propre classe."""
         classes = [self.classes.get(s, f"_{s}") for s in symbols]
-        counts = {c: classes.count(c) for c in set(classes)}
-        return np.array([1.0 / (len(counts) * counts[c]) for c in classes])
+        present = sorted(set(classes))
+        counts = {c: classes.count(c) for c in present}
+        if self.class_shares:
+            default = sum(self.class_shares.values()) / len(self.class_shares)
+            share = {c: float(self.class_shares.get(c, default)) for c in present}
+        else:
+            share = {c: 1.0 for c in present}
+        total = sum(share.values())
+        if total <= 0:
+            raise ValueError("class budgets of the present classes sum to zero")
+        return np.array([share[c] / total / counts[c] for c in classes])
 
     def signal_budgets(
         self, symbols: list[str], signals: Mapping[str, Signal | None], skill: float | None

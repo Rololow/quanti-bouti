@@ -89,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--cost-stress", type=float, default=2.0,
                      help="multiplicateur des coûts pour le stress (0 = désactivé)")
     run.add_argument("--bootstrap", type=int, default=2000, help="tirages du bootstrap")
+    run.add_argument("--max-drawdown", type=float,
+                     help="walk-forward : meilleur rendement passé sous ce drawdown (ex. 0.15) au lieu du Sharpe")
     run.add_argument("--workers", type=int, help="processus en parallèle (défaut : nombre de CPU)")
     run.add_argument("--out", default="data/backtest/report.json")
     args = parser.parse_args(argv)
@@ -138,6 +140,20 @@ def main(argv: list[str] | None = None) -> int:
         if not summary["bars"]:
             print(summary)
             return 1
+        if args.command == "download-daily" and not args.no_fx:
+            # Taux courts (T-bill 3 mois) pour le financement du cash et du levier.
+            from trading_engine.backtest.dataset import rates_path
+            from trading_engine.backtest.sources import yahoo_short_rates
+            from trading_engine.portfolio.financing import RateSeries
+
+            try:
+                rates = yahoo_short_rates(date.fromisoformat(summary["start"]) - timedelta(days=10),
+                                          date.fromisoformat(summary["end"]))
+                rates_path(out).write_text(json.dumps(RateSeries(rates, "yahoo ^IRX").to_payload()),
+                                           encoding="utf-8")
+                summary["rates"] = len(rates)
+            except Exception as exc:
+                summary["rates"] = f"non téléchargés ({exc})"
         if not args.no_fx and summary["bars"]:
             try:
                 rates = fetch_ecb_rates("USD", date.fromisoformat(summary["start"]) - timedelta(days=10),
@@ -162,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     report = run_backtest(
         args.data, config=args.config, overlays=overlays, eval_start=args.eval_start, eval_end=args.eval_end,
         grid=grid, variants=[v.strip() for v in args.variants.split(",") if v.strip()], workers=args.workers,
-        cost_stress=args.cost_stress, bootstrap_samples=args.bootstrap,
+        cost_stress=args.cost_stress, bootstrap_samples=args.bootstrap, max_drawdown=args.max_drawdown,
     )
     out = resolve_path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -54,12 +54,16 @@ def simulate(
     cost_bps: float,
     tax: TaxFn | None = None,
     params: dict | None = None,
+    cash_rate: Callable[[date], float] | None = None,
 ) -> StrategyResult:
-    """`weights_on(i)` : poids cibles à la clôture du jour i (None = pas de rebalancement)."""
+    """`weights_on(i)` : poids cibles à la clôture du jour i (None = pas de rebalancement).
+    `cash_rate(jour)` : taux court annuel rémunérant le cash (comme le moteur)."""
     qty: dict[str, float] = {s: 0.0 for s in prices}
     last: dict[str, float] = {}
     result = StrategyResult(name, [], params=dict(params or {}))
     for i, day in enumerate(days):
+        if cash_rate is not None and i > 0 and cash > 0:
+            cash += cash * cash_rate(days[i - 1]) * (day - days[i - 1]).days / 365.0
         for s in prices:
             if day in prices[s]:
                 last[s] = prices[s][day]
@@ -86,16 +90,17 @@ def simulate(
 
 
 def buy_and_hold(days, prices, *, cash: float, cost_bps: float, tax: TaxFn | None = None,
-                 min_cash: float = 0.02) -> StrategyResult:
+                 min_cash: float = 0.02, cash_rate=None) -> StrategyResult:
     symbols = sorted(prices)
     w = (1.0 - min_cash) / len(symbols)
     return simulate("Buy & hold équipondéré", days, prices,
                     lambda i: {s: w for s in symbols} if i == 0 else None,
-                    cash=cash, cost_bps=cost_bps, tax=tax)
+                    cash=cash, cost_bps=cost_bps, tax=tax, cash_rate=cash_rate)
 
 
 def monthly_inverse_vol(days, prices, *, cash: float, cost_bps: float, tax: TaxFn | None = None,
-                        lookback: int = 60, min_obs: int = 20, min_cash: float = 0.02) -> StrategyResult:
+                        lookback: int = 60, min_obs: int = 20, min_cash: float = 0.02,
+                        cash_rate=None) -> StrategyResult:
     symbols = sorted(prices)
 
     def vol(sym: str, i: int) -> float | None:
@@ -119,15 +124,15 @@ def monthly_inverse_vol(days, prices, *, cash: float, cost_bps: float, tax: TaxF
         return {s: (1.0 - min_cash) * x / total for s, x in inv.items()}
 
     return simulate("Risk parity mensuelle (1/vol)", days, prices, weights_on,
-                    cash=cash, cost_bps=cost_bps, tax=tax, params={"lookback": lookback})
+                    cash=cash, cost_bps=cost_bps, tax=tax, params={"lookback": lookback}, cash_rate=cash_rate)
 
 
 def monthly_fixed(name: str, days, prices, weights: Mapping[str, float], *, cash: float, cost_bps: float,
-                  tax: TaxFn | None = None, min_cash: float = 0.02) -> StrategyResult | None:
+                  tax: TaxFn | None = None, min_cash: float = 0.02, cash_rate=None) -> StrategyResult | None:
     """Poids fixes rebalancés chaque mois (ex. 60/40 actions/obligations)."""
     if not all(s in prices for s in weights):
         return None
     target = {s: (1.0 - min_cash) * w for s, w in weights.items()}
     return simulate(name, days, prices,
                     lambda i: target if i == 0 or days[i].month != days[i - 1].month else None,
-                    cash=cash, cost_bps=cost_bps, tax=tax, params=dict(weights))
+                    cash=cash, cost_bps=cost_bps, tax=tax, params=dict(weights), cash_rate=cash_rate)

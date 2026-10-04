@@ -108,6 +108,13 @@ class AllocationConfig:
     rebalance_timeframe: str = "1h"
     target_vol: float = 0.10
     min_skill: float = 0.0
+    # class_parity : part du risque par classe (constraints.sectors), ex.
+    # {equity: 0.5, bonds: 0.25, commodities: 0.25} ; vide = parts égales.
+    class_budgets: Mapping[str, float] = field(default_factory=dict)
+    # Contrôle du drawdown (Grossman-Zhou) : l'exposition est réduite en
+    # proportion de la marge restante avant ce drawdown (ex. 0.15) ; None = aucun.
+    drawdown_control: float | None = None
+    drawdown_min_scale: float = 0.0
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     constraints: Constraints = field(default_factory=Constraints)
 
@@ -116,6 +123,12 @@ class AllocationConfig:
             raise ValueError(
                 f"unknown allocation method {self.method!r}, expected one of {ALLOCATION_METHODS}"
             )
+        if any(v < 0 for v in self.class_budgets.values()):
+            raise ValueError("allocation.class_budgets must be >= 0")
+        if self.drawdown_control is not None and not 0 < self.drawdown_control < 1:
+            raise ValueError("allocation.drawdown_control must be in (0, 1)")
+        if not 0 <= self.drawdown_min_scale <= 1:
+            raise ValueError("allocation.drawdown_min_scale must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -256,6 +269,20 @@ class AISettings:
 
 
 @dataclass(frozen=True)
+class FinancingConfig:
+    """Intérêts sur le cash et coût du levier (voir portfolio/financing.py).
+    Désactivé par défaut ; en backtest, la série T-bill (^IRX) du dataset est
+    utilisée si présente, sinon `fixed_rate`. Jamais appliqué avec un compte
+    broker réel (le broker fait foi)."""
+
+    enabled: bool = False
+    fixed_rate: float = 0.0           # taux court annuel si aucune série
+    borrow_spread: float = 0.005      # emprunt : taux court + 0,5 % (≈ financement implicite des futures)
+    credit_cash: bool = True          # cash positif rémunéré
+    credit_spread: float = 0.0        # cash : taux court - écart
+
+
+@dataclass(frozen=True)
 class CalendarConfig:
     """Séances de marché. `auto` : actif avec le flux Alpaca (calendrier
     Alpaca, règles NYSE en repli), inactif en simulation ; en replay, le
@@ -334,6 +361,7 @@ class Config:
     warmup: WarmupConfig = field(default_factory=WarmupConfig)
     calendar: CalendarConfig = field(default_factory=CalendarConfig)
     fx: FxConfig = field(default_factory=FxConfig)
+    financing: FinancingConfig = field(default_factory=FinancingConfig)
     instruments: Mapping[str, Instrument] = field(default_factory=dict)
 
     @classmethod
@@ -428,6 +456,7 @@ class Config:
             warmup=WarmupConfig(**(raw.get("warmup") or {})),
             calendar=CalendarConfig(**(raw.get("calendar") or {})),
             fx=FxConfig(**(raw.get("fx") or {})),
+            financing=FinancingConfig(**(raw.get("financing") or {})),
             alerts=AlertConfig(**{
                 k: tuple(v) if k == "regime_horizons" else v
                 for k, v in (raw.get("alerts") or {}).items()

@@ -82,6 +82,12 @@ def stooq_daily(symbol: str, start: date, end: date, *, http_get: Callable[[str]
 SOURCES = {"yahoo": yahoo_daily, "stooq": stooq_daily}
 
 
+def yahoo_short_rates(start: date, end: date, *, http_get: Callable[[str], str] = _get) -> dict[date, float]:
+    """Taux T-bill 3 mois (^IRX, en %) -> {jour: taux annuel décimal}."""
+    rows = yahoo_daily("^IRX", start, end, http_get=http_get)
+    return {date.fromisoformat(r["Date"]): float(r["Close"]) / 100.0 for r in rows}
+
+
 def download_csvs(symbols: Iterable[str], start: date, end: date, directory: str | Path, *,
                   source: str = "yahoo", retries: int = 3, pause: float = 2.0,
                   http_get: Callable[[str], str] = _get, sleep: Callable[[float], None] = time.sleep) -> dict[str, Path]:

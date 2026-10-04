@@ -156,6 +156,21 @@ coûteuses, ne dominent plus. Références ajoutées : actions mondiales (proxy
 ACWI : SPY 60 / EFA 30 / EEM 10) et All-Weather (SPY 30 / TLT 40 / IEF 15 /
 GLD 7,5 / DBC 7,5), rebalancées chaque mois.
 
+**Levier, budgets de risque et limite de perte** (`config/leverage.yaml`) :
+exposition jusqu'à 2×, financée au taux T-bill (^IRX, téléchargé avec les
+données) + 0,5 % — approximation d'un levier par futures ; un prêt sur marge
+coûte plus cher (`financing.borrow_spread`). `allocation.class_budgets`
+répartit le risque entre classes (ex. `{equity: 0.5, bonds: 0.25,
+commodities: 0.25}`). `allocation.drawdown_control` (ex. 0.15) réduit
+l'exposition à mesure que la perte depuis le plus haut approche la limite
+(Grossman-Zhou : exposition ∝ marge au-dessus du plancher), et le Safety
+Engine arrête tout à la limite (`risk.limits.max_drawdown`). Les variantes
+`lev15`, `lev30`, `lev15_actions`, `lev30_actions` du backtest comparent
+limites -15 % / -30 % et budgets égaux / 50 % actions sur plusieurs cibles de
+volatilité ; le walk-forward choisit chaque année le meilleur rendement passé
+resté dans la limite de perte. Le cash est rémunéré au T-bill (références
+comprises).
+
 **Config par défaut : risk parity sans alpha** (`allocation.method:
 risk_parity`, `decision.include_alpha: false`). Sur 2006-2026, le moteur avec
 modèles reste quasi en cash et n'apporte rien ; les modèles restent

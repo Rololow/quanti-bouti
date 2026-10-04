@@ -30,6 +30,7 @@ from trading_engine.data.events import (
     OrderUpdateEvent,
     PortfolioEvent,
     QuoteEvent,
+    RatesEvent,
     RiskEvent,
     TaxLedgerEvent,
     TradeEvent,
@@ -40,7 +41,7 @@ EVENT_CLASSES: dict[str, type[Event]] = {
     for cls in (
         MarketEvent, TradeEvent, QuoteEvent, BarEvent, NewsEvent, FundamentalEvent,
         PortfolioEvent, RiskEvent, DecisionEvent, AlertEvent, NewsAnalysisEvent, OrderUpdateEvent,
-        CalendarEvent, FxEvent, TaxLedgerEvent,
+        CalendarEvent, FxEvent, TaxLedgerEvent, RatesEvent,
     )
 }
 
