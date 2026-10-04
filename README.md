@@ -102,6 +102,30 @@ python -m trading_engine.backtest synthetic --start 2022-01-01 --end 2024-12-31
 python -m trading_engine.backtest run --data data/backtest/synthetic_30m.jsonl
 ```
 
+**Historique quotidien long, sans clé** (Yahoo, repli Stooq ; depuis 2005,
+donc 2008, 2020 et 2022 inclus) :
+
+```bash
+python -m trading_engine.backtest download-daily --start 2005-01-01
+python -m trading_engine.backtest --overlay config/backtest_daily.yaml run --data data/backtest/daily.jsonl
+```
+
+Le workflow GitHub **backtest** fait la même chose sur un runner (lancement
+manuel depuis l'onglet Actions, chaque lundi, et sur les PR qui touchent au
+backtest) : le rapport s'affiche dans le résumé du job. Les données ne sont
+pas commitées (sources non officielles).
+
+Le rapport ne donne pas qu'un chiffre : intervalle de confiance du Sharpe
+(bootstrap par blocs de 20 séances), écart de Sharpe apparié avec chaque
+référence (buy & hold, risk parity mensuelle, **60/40 SPY/TLT**) et
+probabilité qu'il soit positif, **Sharpe dégonflé** (corrigé du nombre de
+configurations essayées), rendement par année et par épisode de stress (2008,
+2011, 2015-16, 2018, 2020, 2022…), **stress des coûts** (spread et
+slippage ×2, `--cost-stress`) et traçabilité (empreinte des données, commit,
+config, versions). La variante « 1 décision/séance »
+(`allocation.rebalance_timeframe: session`) décide une fois par séance au
+lieu de chaque heure.
+
 La config du backtest est `config/config.yaml` + la surcouche
 `config/backtest.yaml` (réglages 5m remplacés par 30m/1h, départ en cash).
 Le rapport (`data/backtest/report.json` et `.md`) donne, sur la fenêtre

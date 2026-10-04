@@ -199,11 +199,21 @@ def test_backtest_end_to_end_on_synthetic_data(tmp_path):
     data = tmp_path / "bars.jsonl"
     write_synthetic_dataset(data, ["SPY", "TLT", "GLD"], date(2025, 1, 2), date(2025, 3, 31), seed=3)
     kwargs = dict(config=DEFAULT_CONFIG_PATH, overlays=[OVERLAY], eval_start=date(2025, 3, 1),
-                  grid=parse_grid(["decision.holding_period=60d,240d"]), variants=["sans_modeles"], workers=1)
+                  grid=parse_grid(["decision.holding_period=60d,240d"]), variants=["sans_modeles"], workers=1,
+                  bootstrap_samples=100)
     report = run_backtest(data, **kwargs)
     names = [r["name"] for r in report["rows"]]
-    assert names[:2] == ["Buy & hold équipondéré", "Risk parity mensuelle (1/vol)"]
-    assert len(names) == 5 and "walk-forward" in names[-1]
+    assert names[:3] == ["Buy & hold équipondéré", "Risk parity mensuelle (1/vol)", "60/40 SPY/TLT (mensuel)"]
+    assert len(names) == 6 and "walk-forward" in names[-1]
+    stress = report["cost_stress"]
+    assert stress["multiplier"] == 2.0 and len(stress["rows"]) == 4          # 3 références + 1 moteur
+    assert "coûts ×2" in stress["rows"][-1]["name"] and stress["rows"][-1]["stats"]["fills"] >= 0
+    prov = report["provenance"]
+    assert len(prov["dataset_sha256"]) == 64 and prov["numpy"] and prov["grid"]
+    engine_row = [r for r in report["rows"] if r["kind"] == "engine:sans_modeles"][-1]
+    assert set(engine_row["vs"]) == set(names[:3]) and "deflated_sharpe" in engine_row
+    assert engine_row["sharpe_ci"]["sharpe"] == engine_row["metrics"]["sharpe"]
+    assert 2025 in engine_row["years"]
     for r in report["rows"]:
         m = r["metrics"]
         assert m["start"] >= date(2025, 3, 1) and m["days"] >= 15 and m["cagr_eur"] is not None
@@ -220,7 +230,137 @@ def test_backtest_end_to_end_on_synthetic_data(tmp_path):
     assert report["fx"]["source"] == "fixed" and report["tax_currency"] == "EUR"
     text = format_report(report)
     assert "| Moteur sans modèles" in text and "Walk-forward" in text and "Limites" in text
+    for section in ("## Le moteur bat-il les références ?", "## Rendement par année", "## Stress des coûts",
+                    "## Traçabilité"):
+        assert section in text
     assert json.loads(to_json(report))["eval_start"] == "2025-03-01"
     # déterministe
     again = run_backtest(data, **kwargs)
     assert [r["metrics"] for r in again["rows"]] == [r["metrics"] for r in report["rows"]]
+
+
+# ------------------------------------------------------------------ statistiques de robustesse
+
+from trading_engine.backtest import stats
+from trading_engine.backtest.benchmarks import monthly_fixed
+from trading_engine.backtest.dataset import import_daily_csv
+from trading_engine.backtest.sources import download_csvs, stooq_daily, yahoo_daily
+
+
+def test_bootstrap_and_deflated_sharpe():
+    import numpy as np
+    rng = np.random.default_rng(0)
+    good = rng.normal(0.001, 0.01, 2000)                  # Sharpe ≈ 1,6
+    ci = stats.bootstrap_sharpe(good, samples=300)
+    assert ci["low"] < ci["sharpe"] < ci["high"] and ci["low"] > 0
+    noise = rng.normal(0.0, 0.01, 2000)
+    days = [date(2020, 1, 1) + timedelta(days=i) for i in range(2000)]
+    same = stats.bootstrap_difference(dict(zip(days, good)), dict(zip(days, good)), samples=200)
+    assert same["difference"] == 0 and same["p_better"] == 0
+    better = stats.bootstrap_difference(dict(zip(days, good)), dict(zip(days, noise)), samples=300)
+    assert better["difference"] > 0 and better["p_better"] > 0.9
+    one = stats.deflated_sharpe(good, [1.6])
+    many = stats.deflated_sharpe(good, [1.6, 0.5, -0.4, 1.0, 0.2, 1.3, -0.8, 0.7])
+    assert one["dsr"] > 0.99 and many["dsr"] < one["dsr"] and many["sr0"] > 0
+    assert stats.deflated_sharpe(noise[:5], [0.1])["dsr"] is None
+
+
+def test_yearly_and_period_returns():
+    series = [(date(2020, 12, 31), 100.0), (date(2021, 6, 30), 110.0), (date(2021, 12, 31), 120.0),
+              (date(2022, 3, 1), 90.0), (date(2022, 12, 30), 108.0)]
+    assert stats.yearly_returns(series, date(2020, 12, 31), date(2022, 12, 30)) == \
+        pytest.approx({2020: 0.0, 2021: 0.2, 2022: -0.1})
+    p = stats.period_stats(series, date(2022, 1, 1), date(2022, 3, 31))
+    assert p["return"] == pytest.approx(-0.25) and p["max_drawdown"] == pytest.approx(-0.25)
+    assert stats.period_stats(series, date(2030, 1, 1), date(2030, 2, 1)) is None
+
+
+def test_sixty_forty_benchmark():
+    days = [date(2026, 1, 1) + timedelta(days=i) for i in range(70)]
+    prices = {"SPY": {d: 100.0 for d in days}, "TLT": {d: 50.0 for d in days}}
+    r = monthly_fixed("60/40", days, prices, {"SPY": 0.6, "TLT": 0.4}, cash=1000.0, cost_bps=0.0, min_cash=0.0)
+    first = [n for d, n in r.trades if d == days[0]]
+    assert sorted(first) == pytest.approx([400.0, 600.0])
+    assert {d.day for d, _ in r.trades} == {1}
+    assert monthly_fixed("x", days, {"SPY": prices["SPY"]}, {"SPY": 0.6, "TLT": 0.4}, cash=1.0, cost_bps=0.0) is None
+
+
+# ------------------------------------------------------------------ données quotidiennes
+
+def test_import_daily_csv_adjusts_and_uses_sessions(tmp_path):
+    f = tmp_path / "spy.csv"
+    f.write_text("Date,Open,High,Low,Close,Adj Close,Volume\n"
+                 "2025-11-28,100,102,99,101,50.5,1000\n"       # lendemain de Thanksgiving : clôture 13h
+                 "2025-11-29,1,1,1,1,1,1\n"                     # samedi : ignoré
+                 "2025-12-01,null,null,null,null,null,null\n"    # ligne vide
+                 "2025-12-02,101,103,100,102,51,2000\n", encoding="utf-8")
+    out = tmp_path / "daily.jsonl"
+    summary = import_daily_csv({"SPY": f}, out)
+    bars = list(read_events(out))
+    assert summary["bars"] == 2 and summary["skipped"] == {"SPY": 2}
+    first = bars[0]
+    assert first.timeframe == "1d" and first.end.hour == 18 and first.end - first.timestamp == timedelta(hours=3, minutes=30)
+    assert first.close == 50.5 and first.open == pytest.approx(50.0) and first.high == pytest.approx(51.0)
+    with pytest.raises(ValueError, match="missing columns"):
+        bad = tmp_path / "bad.csv"
+        bad.write_text("Day,Price\n2025-01-02,1\n", encoding="utf-8")
+        import_daily_csv({"X": bad}, tmp_path / "x.jsonl")
+
+
+def test_yahoo_and_stooq_parsers():
+    ts = int(datetime(2025, 3, 3, 14, 30, tzinfo=UTC).timestamp())
+    payload = {"chart": {"error": None, "result": [{
+        "timestamp": [ts, ts + 86400],
+        "indicators": {"quote": [{"open": [1.0, None], "high": [2.0, None], "low": [0.5, None],
+                                  "close": [1.5, None], "volume": [10, None]}],
+                       "adjclose": [{"adjclose": [1.2, None]}]}}]}}
+    urls = []
+
+    def fake(url):
+        urls.append(url)
+        return json.dumps(payload)
+
+    rows = yahoo_daily("SPY", date(2025, 3, 1), date(2025, 3, 5), http_get=fake)
+    assert rows == [{"Date": "2025-03-03", "Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5,
+                     "Adj Close": 1.2, "Volume": 10}]
+    assert "query1.finance.yahoo.com/v8/finance/chart/SPY" in urls[0] and "interval=1d" in urls[0]
+    with pytest.raises(LookupError):
+        yahoo_daily("X", date(2025, 3, 1), date(2025, 3, 5),
+                    http_get=lambda u: json.dumps({"chart": {"error": {"code": "Not Found"}}}))
+    csv_text = "Date,Open,High,Low,Close,Volume\n2025-03-03,1,2,0.5,1.5,10\n"
+    assert stooq_daily("SPY", date(2025, 3, 1), date(2025, 3, 5), http_get=lambda u: csv_text)[0]["Close"] == "1.5"
+    with pytest.raises(LookupError):
+        stooq_daily("SPY", date(2025, 3, 1), date(2025, 3, 5), http_get=lambda u: "No data")
+
+
+def test_download_csvs_retries(tmp_path):
+    calls = {"n": 0}
+
+    def flaky(url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("429 Too Many Requests")
+        return "Date,Open,High,Low,Close,Volume\n2025-03-03,1,2,0.5,1.5,10\n"
+
+    files = download_csvs(["SPY"], date(2025, 3, 1), date(2025, 3, 5), tmp_path, source="stooq",
+                          http_get=flaky, sleep=lambda s: None)
+    assert calls["n"] == 2 and files["SPY"].read_text(encoding="utf-8").startswith("Date,Open")
+
+
+# ------------------------------------------------------------------ une décision par séance
+
+def test_session_rebalancing_decides_once_per_session():
+    import dataclasses
+    cfg = load_config()
+    cfg = dataclasses.replace(
+        cfg, engine=dataclasses.replace(cfg.engine, max_events=22000, report_every=0),
+        allocation=dataclasses.replace(cfg.allocation, method="hrp", rebalance_timeframe="session"),
+        calendar=dataclasses.replace(cfg.calendar, mode="on"),
+        risk=dataclasses.replace(cfg.risk, min_observations=5))
+    from trading_engine.engine import Engine
+    e = Engine(cfg)
+    asyncio.run(e.run())
+    sessions = [e.calendar.session_at(d.timestamp) for d in e.decisions]
+    assert len(e.decisions) == 2 and all(s is not None for s in sessions)
+    assert len({s.day for s in sessions}) == 2
+    assert all(d.timestamp >= s.open + timedelta(minutes=5) for d, s in zip(e.decisions, sessions))

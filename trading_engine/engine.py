@@ -74,7 +74,7 @@ from trading_engine.data.events import CalendarEvent, OrderUpdateEvent, Portfoli
 from trading_engine.data.events import FxEvent, TaxLedgerEvent
 from trading_engine.tax.fx import FxRates, fetch_ecb_rates
 from trading_engine.backtest.dataset import BarDatasetFeed, fx_path as dataset_fx_path
-from trading_engine.data.calendar import MarketCalendar
+from trading_engine.data.calendar import NY, MarketCalendar
 from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
@@ -199,6 +199,7 @@ class Engine:
         self.calendar: MarketCalendar | None = None
         self.market_block: str | None = None  # raison de ne pas trader au dernier intervalle
         self._bootstrapped = False
+        self._last_session_decision: date | None = None
         self.fx: FxRates | None = None
         self._fx_attempt: datetime | None = None
         # Registre fiscal persistant seulement avec un compte broker réel (paper
@@ -410,6 +411,8 @@ class Engine:
         closed = self.bar_builder.flush(event.timestamp) + self.bar_builder.on_trade(event)
         for bar in sorted(closed, key=lambda b: (b.end, b.timeframe, b.symbol)):
             await self.bus.publish(bar)
+        if self.config.allocation.rebalance_timeframe == "session":
+            self._session_tick(event.timestamp)
 
         if self.broker is not None:
             update = self.broker.on_trade(event)
@@ -436,6 +439,26 @@ class Engine:
             self.volume.update(event.symbol, event.volume)
         if event.timeframe == self.config.allocation.rebalance_timeframe:
             self._interval_due = True
+
+    def _session_tick(self, ts: datetime) -> None:
+        """`rebalance_timeframe: session` : une décision par séance, au premier
+        instant tradable (après les minutes évitées de l'ouverture). Une barre
+        1d, alignée sur minuit UTC, ne se ferme qu'à l'ouverture suivante :
+        décider sur elle tomberait toujours dans la fenêtre évitée."""
+        cal = self.calendar
+        if cal is not None:
+            session = cal.session_at(ts)
+            c = self.config.calendar
+            if session is None or session.day == self._last_session_decision or \
+                    cal.trading_block(ts, c.avoid_open_minutes, c.avoid_close_minutes) is not None:
+                return
+            key = session.day
+        else:
+            key = ts.astimezone(NY).date()          # sans calendrier : une fois par jour
+            if key == self._last_session_decision:
+                return
+        self._last_session_decision = key
+        self._interval_due = True
 
     def universe(self) -> list[str]:
         return sorted(set(self.config.feed.symbols) | set(self.features.symbols()))

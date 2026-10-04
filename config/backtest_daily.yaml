@@ -1,0 +1,74 @@
+# Surcouche de config/config.yaml pour le backtest sur barres QUOTIDIENNES
+# longues (ex. CSV Stooq depuis 2005 : python -m trading_engine.backtest
+# import-csv), utilisée avec --overlay config/backtest_daily.yaml.
+#
+# Tout passe en 1d : features, régimes, prédicteurs (horizon d'une semaine),
+# volume, risque ; une décision par séance.
+
+engine:
+  max_events: null
+  report_every: 0
+
+feed:
+  provider: dataset
+  dataset_path: data/backtest/daily.jsonl
+
+bars:
+  timeframes: [1d]
+
+features:
+  momentum_horizons: [1d, 20d, 60d, 252d]
+  mean_reversion_timeframes: [1d]
+  correlation_timeframes: [1d]
+
+allocation:
+  method: signal
+  rebalance_timeframe: session
+  baseline:
+    momentum_horizon: 20d
+    vol_timeframe: 1d
+
+decision:
+  holding_period: 60d
+
+models:
+  regimes:
+    timeframes: {LT: 1d}
+    refit_every: 50
+  predictors:
+    - name: trend
+      timeframe: 1d
+      horizon_bars: 5        # une semaine
+      features: [mom_20d, mom_60d]
+      forgetting: 0.998
+      ridge: 10.0
+      min_samples: 120
+    - name: reversion
+      timeframe: 1d
+      horizon_bars: 5
+      features: [z_1d, reversal_1d]
+      forgetting: 0.998
+      ridge: 10.0
+      min_samples: 120
+
+risk:
+  timeframe: 1d
+
+integrity:
+  stale_after: 14400.0     # 4 trades synthétiques par séance
+
+execution:
+  mode: paper
+  volume_timeframe: 1d
+  optimizer:
+    durations: [2h, 4h, 6h]
+    alpha_half_life: 5d
+
+alerts:
+  vol_fast: 1d
+  vol_slow: 1d
+  correlation_timeframe: 1d
+
+portfolio:
+  cash: 100000.0
+  positions: {}

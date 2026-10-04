@@ -1,0 +1,89 @@
+name: backtest
+
+# Backtest sur données réelles quotidiennes (Yahoo, repli Stooq), lancé à la
+# main (onglet Actions -> backtest -> Run workflow) et chaque lundi. Le rapport
+# s'affiche dans le résumé du job et reste téléchargeable (artefact). Les
+# données ne sont pas commitées (sources non officielles, pas de
+# redistribution) ; elles sont gardées en cache une semaine.
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Début des données (AAAA-MM-JJ)"
+        default: "2005-01-01"
+      symbols:
+        description: "Symboles (vide = feed.symbols de la config)"
+        default: ""
+      grid:
+        description: "Grille du walk-forward"
+        default: "decision.holding_period=20d,60d,120d"
+      variants:
+        description: "Variantes du moteur"
+        default: "complet,sans_modeles"
+  schedule:
+    - cron: "17 6 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/backtest.yml"
+      - "trading_engine/backtest/**"
+      - "config/backtest_daily.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      START: ${{ inputs.start || '2005-01-01' }}
+      SYMBOLS: ${{ inputs.symbols || '' }}
+      GRID: ${{ inputs.grid || 'decision.holding_period=20d,60d,120d' }}
+      VARIANTS: ${{ inputs.variants || 'complet,sans_modeles' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - name: Cache des données (une semaine)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: data/backtest
+          key: daily-${{ env.START }}-${{ env.SYMBOLS }}-${{ github.run_id }}
+          restore-keys: daily-${{ env.START }}-${{ env.SYMBOLS }}-
+      - name: Données quotidiennes
+        run: |
+          set -o pipefail
+          args=(--start "$START")
+          if [ -n "$SYMBOLS" ]; then args+=(--symbols "$SYMBOLS"); fi
+          if [ -f data/backtest/daily.jsonl ] && [ -n "$(find data/backtest/daily.jsonl -mtime -7)" ]; then
+            echo "données en cache (moins d'une semaine)"
+          else
+            python -m trading_engine.backtest download-daily "${args[@]}" --source yahoo \
+              || python -m trading_engine.backtest download-daily "${args[@]}" --source stooq
+          fi
+      - name: Backtest
+        run: |
+          python -m trading_engine.backtest --overlay config/backtest_daily.yaml run \
+            --data data/backtest/daily.jsonl --grid "$GRID" --variants "$VARIANTS" \
+            --out data/backtest/report.json
+      - name: Rapport dans le résumé
+        if: always()
+        run: |
+          if [ -f data/backtest/report.md ]; then cat data/backtest/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backtest-report
+          path: |
+            data/backtest/report.md
+            data/backtest/report.json
+          if-no-files-found: ignore

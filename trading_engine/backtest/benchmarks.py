@@ -120,3 +120,14 @@ def monthly_inverse_vol(days, prices, *, cash: float, cost_bps: float, tax: TaxF
 
     return simulate("Risk parity mensuelle (1/vol)", days, prices, weights_on,
                     cash=cash, cost_bps=cost_bps, tax=tax, params={"lookback": lookback})
+
+
+def monthly_fixed(name: str, days, prices, weights: Mapping[str, float], *, cash: float, cost_bps: float,
+                  tax: TaxFn | None = None, min_cash: float = 0.02) -> StrategyResult | None:
+    """Poids fixes rebalancés chaque mois (ex. 60/40 actions/obligations)."""
+    if not all(s in prices for s in weights):
+        return None
+    target = {s: (1.0 - min_cash) * w for s, w in weights.items()}
+    return simulate(name, days, prices,
+                    lambda i: target if i == 0 or days[i].month != days[i - 1].month else None,
+                    cash=cash, cost_bps=cost_bps, tax=tax, params=dict(weights))

@@ -30,11 +30,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from trading_engine.backtest import metrics
+from trading_engine.backtest import metrics, stats
 from trading_engine.backtest.benchmarks import (
     StrategyResult,
     buy_and_hold,
     daily_closes,
+    monthly_fixed,
     monthly_inverse_vol,
 )
 from trading_engine.backtest.dataset import fx_path, read_closes
@@ -52,11 +53,18 @@ logger = logging.getLogger(__name__)
 VARIANTS: dict[str, dict[str, Any]] = {
     "complet": {"allocation.method": "signal", "decision.include_alpha": True},
     "sans_modeles": {"allocation.method": "risk_parity", "decision.include_alpha": False},
+    # Une décision par séance (au lieu de chaque heure) : horizon où le momentum
+    # documenté existe, et beaucoup moins de bruit de rebalancement.
+    "seance": {"allocation.method": "risk_parity", "decision.include_alpha": False,
+               "allocation.rebalance_timeframe": "session"},
 }
 VARIANT_LABELS = {
     "complet": "Moteur complet (signaux + décision)",
     "sans_modeles": "Moteur sans modèles (risk parity + décision)",
+    "seance": "Moteur sans modèles, 1 décision/séance",
 }
+COST_KEYS = ("execution.cost.default_spread_bps", "execution.cost.slippage_bps",
+             "decision.default_spread_bps", "decision.slippage_bps")
 
 
 # ------------------------------------------------------------------ config
@@ -248,6 +256,8 @@ def run_backtest(
     variants: Sequence[str] = tuple(VARIANTS),
     workers: int | None = None,
     halt_reset_days: float = 1.0,
+    cost_stress: float = 2.0,
+    bootstrap_samples: int = 2000,
 ) -> dict:
     dataset = resolve_path(dataset)
     cfg = with_params(load_config(config, tuple(overlays)), {"feed.dataset_path": str(dataset)})
@@ -261,12 +271,21 @@ def run_backtest(
         raise ValueError(f"evaluation window is empty ({eval_start} >= {eval_end})")
     fx = load_fx(cfg, dataset)
 
-    jobs = [
-        {"config": str(config), "overlays": [str(o) for o in overlays], "dataset": str(dataset),
-         "params": dict(p), "fixed": VARIANTS[v], "variant": v, "halt_reset_days": halt_reset_days,
-         "name": f"{VARIANT_LABELS[v]} [{label_of(p)}]"}
-        for v in variants for p in grid
-    ]
+    def job(v, params, fixed, name, variant_kind):
+        return {"config": str(config), "overlays": [str(o) for o in overlays], "dataset": str(dataset),
+                "params": dict(params), "fixed": {**VARIANTS[v], **fixed}, "variant": variant_kind,
+                "halt_reset_days": halt_reset_days, "name": name}
+
+    default_index = len(grid) // 2                     # valeur centrale de la grille
+    jobs = [job(v, p, {}, f"{VARIANT_LABELS[v]} [{label_of(p)}]", v) for v in variants for p in grid]
+    stressed_costs = {}
+    if cost_stress and cost_stress != 1.0:
+        # Coûts multipliés (exécution ET estimation de la décision) : le moteur
+        # doit survivre à des coûts plus élevés que prévu.
+        stressed_costs = {k: _get_path(cfg, k) * cost_stress for k in COST_KEYS}
+        jobs += [job(v, grid[default_index], stressed_costs,
+                     f"{VARIANT_LABELS[v]} [{label_of(grid[default_index])}, coûts ×{cost_stress:g}]", f"stress:{v}")
+                 for v in variants]
     workers = max(1, min(workers or os.cpu_count() or 1, len(jobs)))
     logger.info("backtest: %d engine runs on %d worker(s)", len(jobs), workers)
     if workers == 1:
@@ -284,9 +303,14 @@ def run_backtest(
         monthly_inverse_vol(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash),
     ]
 
+    sixty_forty = monthly_fixed("60/40 SPY/TLT (mensuel)", days, prices, {"SPY": 0.6, "TLT": 0.4},
+                                cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash)
+    if sixty_forty is not None:
+        benchmarks.append(sixty_forty)
+
     rows = [row(b, eval_start, eval_end, fx) for b in benchmarks]
     walk = []
-    default_index = len(grid) // 2                     # valeur centrale de la grille
+    wf_series: dict[str, list[tuple[date, float]]] = {}
     for v in variants:
         runs = [r for r in engine_runs if r.kind == f"engine:{v}"]
         rows.extend(row(r, eval_start, eval_end, fx) for r in runs)
@@ -298,6 +322,31 @@ def run_backtest(
             r["metrics"]["transaction_tax"] = None      # déjà dans chaque série recollée
             rows.append(r)
             walk.append({"variant": v, "folds": folds})
+            wf_series[wf.name] = wf.equity
+
+    # Stress des coûts : moteur (runs dédiés) et références (recalculées).
+    stress_rows = []
+    if stressed_costs:
+        bps = cost_bps * cost_stress
+        stressed = [buy_and_hold(days, prices, cash=cash, cost_bps=bps, tax=tax, min_cash=min_cash),
+                    monthly_inverse_vol(days, prices, cash=cash, cost_bps=bps, tax=tax, min_cash=min_cash)]
+        if sixty_forty is not None:
+            stressed.append(monthly_fixed("60/40 SPY/TLT (mensuel)", days, prices, {"SPY": 0.6, "TLT": 0.4},
+                                          cash=cash, cost_bps=bps, tax=tax, min_cash=min_cash))
+        for b in stressed:
+            b.name += f" [coûts ×{cost_stress:g}]"
+            stress_rows.append(row(b, eval_start, eval_end, fx))
+        stress_rows += [row(r, eval_start, eval_end, fx) for r in engine_runs if r.kind.startswith("engine:stress:")]
+
+    series = {r.name: r.equity for r in benchmarks}
+    series.update({r.name: r.equity for r in engine_runs})
+    series.update(wf_series)
+    trial_sharpes = [r["metrics"]["sharpe"] for r in rows if r["kind"].startswith("engine:")]
+    for r in rows:
+        r.update(robustness(series[r["name"]], eval_start, eval_end,
+                            benchmarks=[] if r["kind"] == "benchmark" else benchmarks,
+                            trial_sharpes=trial_sharpes if r["kind"] != "benchmark" else None,
+                            samples=bootstrap_samples))
 
     return {
         "dataset": str(dataset), "bars_start": days[0], "bars_end": days[-1],
@@ -305,7 +354,72 @@ def run_backtest(
         "fx": None if fx is None else {"source": fx.source, "rates": len(fx)},
         "tax_currency": None if tax is None else load_tax_profile(resolve_path(cfg.tax.profile)).currency,
         "currency": cfg.fx.portfolio_currency, "initial_cash": cash, "rows": rows, "walk_forward": walk,
+        "cost_stress": {"multiplier": cost_stress, "rows": stress_rows} if stress_rows else None,
+        "crises": [{"name": n, "start": a, "end": b} for n, a, b in stats.CRISES if b >= eval_start and a <= eval_end],
+        "provenance": provenance(dataset, config, overlays, grid, variants, cost_stress),
         "caveats": CAVEATS,
+    }
+
+
+def _get_path(cfg: Any, key: str) -> Any:
+    for part in key.split("."):
+        cfg = getattr(cfg, part)
+    return cfg
+
+
+def robustness(series: Sequence[tuple[date, float]], start: date, end: date, *,
+               benchmarks: Sequence[StrategyResult], trial_sharpes: Sequence[float] | None,
+               samples: int = 2000) -> dict:
+    """Intervalle de confiance du Sharpe, comparaison appariée aux références,
+    Sharpe dégonflé, rendements annuels et par crise."""
+    window = metrics.window(series, start, end)
+    daily = stats.returns_by_day(window)
+    returns = [daily[d] for d in sorted(daily)]
+    out: dict[str, Any] = {
+        "sharpe_ci": stats.bootstrap_sharpe(returns, samples=samples),
+        "years": stats.yearly_returns(series, start, end),
+        "crises": {name: stats.period_stats(series, max(a, start), min(b, end))
+                   for name, a, b in stats.CRISES if b >= start and a <= end},
+    }
+    if benchmarks:
+        out["vs"] = {b.name: stats.bootstrap_difference(daily, stats.returns_by_day(metrics.window(b.equity, start, end)),
+                                                        samples=samples)
+                     for b in benchmarks}
+    if trial_sharpes is not None:
+        out["deflated_sharpe"] = stats.deflated_sharpe(returns, trial_sharpes)
+    return out
+
+
+def provenance(dataset: Path, config, overlays, grid, variants, cost_stress) -> dict:
+    """De quoi refaire exactement ce backtest : données, code, config, versions."""
+    import hashlib
+    import platform
+    import subprocess
+
+    import numpy
+
+    h = hashlib.sha256()
+    with open(dataset, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    root = Path(__file__).resolve().parents[2]
+    try:
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True,
+                                timeout=10).stdout.strip() or None
+        dirty = bool(subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
+                                    capture_output=True, text=True, timeout=10).stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        commit, dirty = None, None
+    cfg_hash = hashlib.sha256()
+    for path in [config, *overlays]:
+        cfg_hash.update(Path(path).read_bytes())
+    return {
+        "dataset_sha256": h.hexdigest(), "dataset_bytes": dataset.stat().st_size,
+        "git_commit": commit, "git_dirty": dirty,
+        "config": str(config), "overlays": [str(o) for o in overlays], "config_sha256": cfg_hash.hexdigest(),
+        "grid": [dict(g) for g in grid], "variants": list(variants), "cost_stress": cost_stress,
+        "python": platform.python_version(), "numpy": numpy.__version__, "platform": platform.platform(),
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
 
 
@@ -330,32 +444,92 @@ def _num(v, digits=2):
     return "–" if v is None else f"{v:.{digits}f}"
 
 
+def _row_line(r: dict) -> str:
+    m, s = r["metrics"], r["stats"]
+    halts = "–" if not s else f"{s.get('halts', 0)} ({_pct(s.get('halted_share'), 0)})"
+    if s and s.get("halt_reasons"):
+        halts += " " + ", ".join(f"{k}×{n}" for k, n in sorted(s["halt_reasons"].items()))
+    ci = (r.get("sharpe_ci") or {})
+    sharpe = _num(m.get("sharpe"))
+    if ci.get("low") is not None:
+        sharpe += f" [{_num(ci['low'])} ; {_num(ci['high'])}]"
+    return (f"| {r['name']} | {_pct(m.get('cagr'))} | {_pct(m.get('vol'))} | {sharpe} | "
+            f"{_pct(m.get('max_drawdown'))} | {_pct(m.get('cagr_eur'))} | {_pct(m.get('max_drawdown_eur'))} | "
+            f"{_num(m.get('turnover'))} | {_num(m.get('transaction_tax'), 0)} | {halts} |")
+
+
 def format_report(report: dict) -> str:
     ccy, tccy = report["currency"], report.get("tax_currency") or ""
+    header = (f"| Stratégie | CAGR {ccy} | Vol | Sharpe [IC 90 %] | Max DD | CAGR EUR | Max DD EUR | "
+              f"Turnover/an | TOB {tccy} | Arrêts |\n|---|---|---|---|---|---|---|---|---|---|")
+    prov = report.get("provenance") or {}
     lines = [
         f"Backtest {report['symbols']} — données {report['bars_start']} → {report['bars_end']}, "
         f"évaluation {report['eval_start']} → {report['eval_end']}",
         f"Capital initial {report['initial_cash']:,.0f} {ccy} ; change : "
         f"{(report['fx'] or {}).get('source', 'aucun')}",
-        "",
-        f"| Stratégie | CAGR {ccy} | Vol | Sharpe | Max DD | CAGR EUR | Max DD EUR | Turnover/an | TOB {tccy} | Arrêts |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "", "## Résultats", "", header,
     ]
-    for r in report["rows"]:
-        m, s = r["metrics"], r["stats"]
-        halts = "–" if not s else f"{s.get('halts', 0)} ({_pct(s.get('halted_share'), 0)})"
-        if s and s.get("halt_reasons"):
-            halts += " " + ", ".join(f"{k}×{n}" for k, n in sorted(s["halt_reasons"].items()))
-        lines.append(
-            f"| {r['name']} | {_pct(m.get('cagr'))} | {_pct(m.get('vol'))} | {_num(m.get('sharpe'))} | "
-            f"{_pct(m.get('max_drawdown'))} | {_pct(m.get('cagr_eur'))} | {_pct(m.get('max_drawdown_eur'))} | "
-            f"{_num(m.get('turnover'))} | {_num(m.get('transaction_tax'), 0)} | {halts} |")
+    lines += [_row_line(r) for r in report["rows"]]
+
+    engine_rows = [r for r in report["rows"] if r["kind"] != "benchmark" and r.get("vs")]
+    if engine_rows:
+        bench = list(engine_rows[0]["vs"])
+        lines += ["", "## Le moteur bat-il les références ?", "",
+                  "Écart de Sharpe (moteur − référence), IC 90 % par bootstrap par blocs de 20 séances, "
+                  "et probabilité que l'écart soit positif. Sharpe dégonflé : probabilité que le vrai "
+                  "Sharpe soit > 0 compte tenu du nombre de configurations essayées.", "",
+                  "| Stratégie | " + " | ".join(bench) + " | Sharpe dégonflé |",
+                  "|---|" + "---|" * (len(bench) + 1)]
+        for r in engine_rows:
+            cells = []
+            for b in bench:
+                d = r["vs"][b]
+                cells.append("–" if d["difference"] is None else
+                             f"{d['difference']:+.2f} [{_num(d['low'])} ; {_num(d['high'])}], "
+                             f"P>0 = {_pct(d['p_better'], 0)}" if d["low"] is not None else f"{d['difference']:+.2f}")
+            dsr = (r.get("deflated_sharpe") or {})
+            cells.append("–" if dsr.get("dsr") is None else f"{_pct(dsr['dsr'], 0)} (N={dsr['trials']})")
+            lines.append(f"| {r['name']} | " + " | ".join(cells) + " |")
+
+    years = sorted({y for r in report["rows"] for y in (r.get("years") or {})})
+    if years:
+        lines += ["", "## Rendement par année", "", "| Stratégie | " + " | ".join(map(str, years)) + " |",
+                  "|---|" + "---|" * len(years)]
+        for r in report["rows"]:
+            ys = r.get("years") or {}
+            lines.append(f"| {r['name']} | " + " | ".join(_pct(ys.get(y)) for y in years) + " |")
+
+    crises = report.get("crises") or []
+    if crises:
+        names = [c["name"] for c in crises]
+        lines += ["", "## Épisodes de stress (rendement / drawdown max)", "",
+                  "| Stratégie | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+        for r in report["rows"]:
+            cs = r.get("crises") or {}
+            lines.append(f"| {r['name']} | " + " | ".join(
+                "–" if not cs.get(n) else f"{_pct(cs[n]['return'])} / {_pct(cs[n]['max_drawdown'])}"
+                for n in names) + " |")
+
+    stress = report.get("cost_stress")
+    if stress:
+        lines += ["", f"## Stress des coûts (spread et slippage ×{stress['multiplier']:g})", "", header]
+        lines += [_row_line(r) for r in stress["rows"]]
+
     for wf in report["walk_forward"]:
-        lines += ["", f"Walk-forward « {VARIANT_LABELS[wf['variant']]} » :"]
+        lines += ["", f"## Walk-forward « {VARIANT_LABELS[wf['variant']]} »", ""]
         for f in wf["folds"]:
             lines.append(f"- {f['start']} → {f['end']} : {label_of(f['params'])} — {f['reason']} — "
                          f"rendement {_pct(f['return'])}")
-    lines += ["", "Limites :"] + [f"- {c}" for c in report["caveats"]]
+    lines += ["", "## Limites", ""] + [f"- {c}" for c in report["caveats"]]
+    if prov:
+        lines += ["", "## Traçabilité", "",
+                  f"- données : `{report['dataset']}` sha256 {prov.get('dataset_sha256', '')[:16]}…",
+                  f"- code : commit {prov.get('git_commit') or '?'}" + (" (modifications non commitées)"
+                                                                       if prov.get("git_dirty") else ""),
+                  f"- config : {prov.get('config')} + {prov.get('overlays')} sha256 {prov.get('config_sha256', '')[:16]}…",
+                  f"- Python {prov.get('python')}, numpy {prov.get('numpy')}, {prov.get('platform')}",
+                  f"- généré le {prov.get('created_at')}"]
     return "\n".join(lines)
 
 
