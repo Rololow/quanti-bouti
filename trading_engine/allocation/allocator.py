@@ -26,7 +26,7 @@ from trading_engine.allocation.risk_parity import risk_budget_weights
 from trading_engine.allocation.targeting import volatility_target
 from trading_engine.signals.signal import Signal
 
-METHODS = ("risk_parity", "hrp", "signal")
+METHODS = ("risk_parity", "hrp", "signal", "class_parity")
 
 
 class RiskAllocator:
@@ -37,13 +37,23 @@ class RiskAllocator:
         target_vol: float = 0.10,
         max_gross: float = 1.0,
         min_skill: float = 0.0,
+        classes: Mapping[str, str] | None = None,
     ) -> None:
         if method not in METHODS:
             raise ValueError(f"unknown allocation method {method!r}, expected one of {METHODS}")
         self.method = method
+        self.classes = dict(classes or {})
         self.target_vol = target_vol
         self.max_gross = max_gross
         self.min_skill = min_skill
+
+    def class_budgets(self, symbols: list[str]) -> np.ndarray:
+        """Parité par classe d'actifs : chaque classe reçoit la même part du
+        risque, partagée à égalité entre ses membres. Un symbole sans classe
+        forme sa propre classe."""
+        classes = [self.classes.get(s, f"_{s}") for s in symbols]
+        counts = {c: classes.count(c) for c in set(classes)}
+        return np.array([1.0 / (len(counts) * counts[c]) for c in classes])
 
     def signal_budgets(
         self, symbols: list[str], signals: Mapping[str, Signal | None], skill: float | None
@@ -73,6 +83,8 @@ class RiskAllocator:
         steps: dict[str, np.ndarray] = {}
         if self.method == "hrp":
             base = hrp_weights(cov)
+        elif self.method == "class_parity":
+            base = risk_budget_weights(cov, self.class_budgets(symbols))
         else:
             base = risk_budget_weights(cov)
         steps["risk_allocation"] = base

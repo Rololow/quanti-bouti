@@ -50,6 +50,8 @@ allocation:
   #   hrp         : hierarchical risk parity
   #   signal      : budgets de risque issus des signaux (pondérés par le skill
   #                 du modèle) + risk parity
+  #   class_parity : même part de risque par classe d'actifs (constraints.sectors),
+  #                 partagée entre les membres de la classe
   # Défaut : risk_parity. Le backtest 2006-2026 (données réelles) montre que
   # les modèles (signal) n'apportent rien ; ils restent disponibles pour la
   # recherche mais ne doivent être activés qu'avec une preuve backtestée.
@@ -316,6 +318,12 @@ instruments:
   QQQ: {asset_class: etf, domicile: US, distribution: distributing}
   TLT: {asset_class: etf, domicile: US, distribution: distributing, bond_share: 1.0}
   GLD: {asset_class: etf, domicile: US, distribution: accumulating}
+  # Univers élargi (config/universe_wide.yaml)
+  EFA: {asset_class: etf, domicile: US, distribution: distributing}
+  EEM: {asset_class: etf, domicile: US, distribution: distributing}
+  IEF: {asset_class: etf, domicile: US, distribution: distributing, bond_share: 1.0}
+  TIP: {asset_class: etf, domicile: US, distribution: distributing, bond_share: 1.0}
+  DBC: {asset_class: etf, domicile: US, distribution: distributing}
 
 storage:
   # Journal JSONL des événements bruts reçus (null = désactivé). Sert au replay.

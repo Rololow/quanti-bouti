@@ -141,3 +141,25 @@ def test_drift_monitor():
     assert report.turnover_to_target == pytest.approx(0.12)
     assert report.over_threshold == ("A",)
     assert report.target_change == pytest.approx(0.2)
+
+
+def test_class_parity_gives_each_asset_class_the_same_risk():
+    import numpy as np
+    from trading_engine.allocation.allocator import RiskAllocator
+    from trading_engine.risk.portfolio_risk import risk_contributions
+
+    symbols = ["SPY", "EFA", "EEM", "TLT", "GLD"]
+    vols = np.array([0.16, 0.18, 0.24, 0.14, 0.15])
+    corr = np.array([[1, .85, .75, -.3, 0], [.85, 1, .8, -.25, .1], [.75, .8, 1, -.2, .15],
+                     [-.3, -.25, -.2, 1, .2], [0, .1, .15, .2, 1]])
+    cov = np.outer(vols, vols) * corr
+    classes = {"SPY": "equity", "EFA": "equity", "EEM": "equity", "TLT": "bonds", "GLD": "commodities"}
+    alloc = RiskAllocator("class_parity", target_vol=10.0, classes=classes)
+    assert alloc.class_budgets(symbols).tolist() == pytest.approx([1 / 9, 1 / 9, 1 / 9, 1 / 3, 1 / 3])
+    weights, _, _ = alloc.allocate(symbols, cov)
+    w = np.array([weights[s] for s in symbols])
+    rc = risk_contributions(w, cov).relative
+    assert rc[:3].sum() == pytest.approx(1 / 3, abs=1e-6)          # actions ensemble : un tiers
+    assert rc[3] == pytest.approx(1 / 3, abs=1e-6) and rc[4] == pytest.approx(1 / 3, abs=1e-6)
+    plain, _, _ = RiskAllocator("risk_parity", target_vol=10.0).allocate(symbols, cov)
+    assert sum(plain[s] for s in ("SPY", "EFA", "EEM")) > w[:3].sum()  # risk parity simple : 3/5 du risque en actions

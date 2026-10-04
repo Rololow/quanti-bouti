@@ -147,6 +147,15 @@ Le workflow **backtest** lance les deux scénarios. Les ETF US ne sont en
 général pas accessibles aux particuliers européens (pas de KID PRIIPs) : les
 UCITS irlandais sont la voie habituelle. Profil fiscal à faire vérifier.
 
+**Univers élargi et parité par classe** (`config/universe_wide.yaml`) : 8 ETF
+en trois classes (actions SPY/EFA/EEM, obligations TLT/IEF/TIP, matières
+premières GLD/DBC). `allocation.method: class_parity` donne un tiers du risque
+à chaque classe (partagé entre ses membres) : trois ETF d'actions corrélés ne
+pèsent plus triple, et les obligations, peu volatiles mais fiscalement
+coûteuses, ne dominent plus. Références ajoutées : actions mondiales (proxy
+ACWI : SPY 60 / EFA 30 / EEM 10) et All-Weather (SPY 30 / TLT 40 / IEF 15 /
+GLD 7,5 / DBC 7,5), rebalancées chaque mois.
+
 **Config par défaut : risk parity sans alpha** (`allocation.method:
 risk_parity`, `decision.include_alpha: false`). Sur 2006-2026, le moteur avec
 modèles reste quasi en cash et n'apporte rien ; les modèles restent
