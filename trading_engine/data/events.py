@@ -35,6 +35,7 @@ class EventType(str, Enum):
     CALENDAR = "calendar"
     FX = "fx"
     TAX_LEDGER = "tax_ledger"
+    RATES = "rates"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -158,6 +159,13 @@ class FxEvent(Event):
     """Taux de change (payload : `FxRates.to_payload()`)."""
 
     event_type = EventType.FX
+
+
+@dataclass(frozen=True, kw_only=True)
+class RatesEvent(Event):
+    """Taux courts pour le financement (payload : `RateSeries.to_payload()`)."""
+
+    event_type = EventType.RATES
 
 
 @dataclass(frozen=True, kw_only=True)

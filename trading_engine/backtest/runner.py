@@ -38,7 +38,8 @@ from trading_engine.backtest.benchmarks import (
     monthly_fixed,
     monthly_inverse_vol,
 )
-from trading_engine.backtest.dataset import fx_path, meta_path, read_closes
+from trading_engine.backtest.dataset import fx_path, meta_path, rates_path, read_closes
+from trading_engine.portfolio.financing import RateSeries
 from trading_engine.config import Config, load_config, resolve_path
 from trading_engine.data.calendar import NY
 from trading_engine.data.events import EventType
@@ -59,12 +60,28 @@ VARIANTS: dict[str, dict[str, Any]] = {
                "allocation.rebalance_timeframe": "session"},
     # Même part de risque par classe d'actifs (constraints.sectors).
     "classes": {"allocation.method": "class_parity", "decision.include_alpha": False},
+    # Levier + contrôle du drawdown (avec config/leverage.yaml) : limite de
+    # perte -15 % ou -30 %, budgets égaux ou 50 % du risque en actions.
+    "lev15": {"allocation.method": "class_parity", "decision.include_alpha": False,
+              "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15},
+    "lev30": {"allocation.method": "class_parity", "decision.include_alpha": False,
+              "allocation.drawdown_control": 0.30, "risk.limits.max_drawdown": 0.30},
+    "lev15_actions": {"allocation.method": "class_parity", "decision.include_alpha": False,
+                      "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15,
+                      "allocation.class_budgets": {"equity": 0.5, "bonds": 0.25, "commodities": 0.25}},
+    "lev30_actions": {"allocation.method": "class_parity", "decision.include_alpha": False,
+                      "allocation.drawdown_control": 0.30, "risk.limits.max_drawdown": 0.30,
+                      "allocation.class_budgets": {"equity": 0.5, "bonds": 0.25, "commodities": 0.25}},
 }
 VARIANT_LABELS = {
     "complet": "Moteur complet (signaux + décision)",
     "sans_modeles": "Moteur sans modèles (risk parity + décision)",
     "seance": "Moteur sans modèles, 1 décision/séance",
     "classes": "Moteur parité par classe d'actifs",
+    "lev15": "Levier, limite -15 %, classes égales",
+    "lev30": "Levier, limite -30 %, classes égales",
+    "lev15_actions": "Levier, limite -15 %, 50 % du risque en actions",
+    "lev30_actions": "Levier, limite -30 %, 50 % du risque en actions",
 }
 # Références à poids fixes, rebalancées chaque mois (calculées si leurs symboles
 # sont dans le dataset).
@@ -131,10 +148,17 @@ def run_engine(cfg: Config, name: str, params: Mapping[str, Any], *,
     halt_reasons: dict[str, int] = {}
     halted_since: list[datetime | None] = [None]
 
+    gross: list[float] = []
+
     def on_bar(bar) -> None:
         if bar.timeframe != base_tf:
             return
-        equity[bar.end.astimezone(NY).date()] = engine.portfolio.total_value()
+        value = engine.portfolio.total_value()
+        equity[bar.end.astimezone(NY).date()] = value
+        if value > 0:
+            p = engine.portfolio
+            gross.append(sum(abs(pos.quantity * p.prices.get(s, pos.avg_price))
+                             for s, pos in p.positions.items()) / value)
         counters["bars"] += 1
         if engine.safety.state is SafetyState.HALTED:
             counters["halted_bars"] += 1
@@ -176,6 +200,10 @@ def run_engine(cfg: Config, name: str, params: Mapping[str, Any], *,
             "data_rejected": sum(v for k, v in engine.integrity.counts.items()
                                  if k in ("INCONSISTENT_BAR", "GLITCH", "INVALID_SIZE")),
             "elapsed_s": round(time.perf_counter() - t0, 1),
+            "avg_gross": sum(gross) / len(gross) if gross else 0.0,
+            "max_gross": max(gross, default=0.0),
+            "financing_cost": engine.financing_cost,
+            "interest_earned": engine.interest_earned,
             "final_safety": engine.safety.state.value,
         },
     )
@@ -192,8 +220,13 @@ def _run_job(job: dict) -> StrategyResult:
 # ------------------------------------------------------------------ walk-forward
 
 def walk_forward(runs: Sequence[StrategyResult], eval_start: date, eval_end: date,
-                 default: StrategyResult, *, min_days: int = 60) -> tuple[StrategyResult, list[dict]]:
-    """Choix annuel du meilleur Sharpe passé ; série hors échantillon recollée."""
+                 default: StrategyResult, *, min_days: int = 60,
+                 max_drawdown: float | None = None) -> tuple[StrategyResult, list[dict]]:
+    """Choix annuel sur le passé ; série hors échantillon recollée.
+
+    Sans `max_drawdown` : meilleur Sharpe passé. Avec : meilleur rendement passé
+    parmi les paramètres dont le drawdown passé est resté dans la limite (à
+    défaut, le plus faible drawdown passé)."""
     series = {r.name: dict(r.equity) for r in runs}
     folds, stitched, value = [], [], 1.0
     year_starts = [eval_start] + [date(y, 1, 1) for y in range(eval_start.year + 1, eval_end.year + 1)]
@@ -201,13 +234,26 @@ def walk_forward(runs: Sequence[StrategyResult], eval_start: date, eval_end: dat
     for k, fold_start in enumerate(year_starts):
         fold_end = year_starts[k + 1] - timedelta(days=1) if k + 1 < len(year_starts) else eval_end
         best, best_sharpe, reason = default, None, "défaut (pas assez d'historique)"
+        candidates = []
         for r in runs:
             past = metrics.window(r.equity, eval_start, fold_start - timedelta(days=1))
-            if len(past) < min_days:
-                continue
-            sharpe = metrics.compute(past)["sharpe"]
-            if sharpe is not None and (best_sharpe is None or sharpe > best_sharpe):
-                best, best_sharpe, reason = r, sharpe, f"meilleur Sharpe passé ({sharpe:.2f})"
+            if len(past) >= min_days:
+                candidates.append((r, metrics.compute(past)))
+        if max_drawdown is None:
+            for r, m in candidates:
+                sharpe = m["sharpe"]
+                if sharpe is not None and (best_sharpe is None or sharpe > best_sharpe):
+                    best, best_sharpe, reason = r, sharpe, f"meilleur Sharpe passé ({sharpe:.2f})"
+        elif candidates:
+            within = [(r, m) for r, m in candidates if m["max_drawdown"] is not None
+                      and m["max_drawdown"] >= -max_drawdown and m["cagr"] is not None]
+            if within:
+                best, m = max(within, key=lambda x: x[1]["cagr"])
+                reason = (f"meilleur rendement passé ({m['cagr']:.1%}) avec drawdown "
+                          f"{m['max_drawdown']:.1%} ≥ -{max_drawdown:.0%}")
+            else:
+                best, m = max(candidates, key=lambda x: x[1]["max_drawdown"] or -1.0)
+                reason = f"aucun dans la limite : plus faible drawdown passé ({m['max_drawdown']:.1%})"
         chosen = series[best.name]
         fold_idx = [i for i, d in enumerate(days_all) if fold_start <= d <= fold_end]
         start_value = value
@@ -269,6 +315,7 @@ def run_backtest(
     halt_reset_days: float = 1.0,
     cost_stress: float = 2.0,
     bootstrap_samples: int = 2000,
+    max_drawdown: float | None = None,
 ) -> dict:
     dataset = resolve_path(dataset)
     cfg = with_params(load_config(config, tuple(overlays)), {"feed.dataset_path": str(dataset)})
@@ -309,15 +356,23 @@ def run_backtest(
 
     cost_bps = cfg.execution.cost.default_spread_bps / 2 + cfg.execution.cost.slippage_bps
     tax = _tax_fn(cfg, fx)
+    cash_rate = None
+    if cfg.financing.enabled:
+        rp = rates_path(dataset)
+        series = (RateSeries.from_payload(json.loads(rp.read_text(encoding="utf-8"))) if rp.exists()
+                  else RateSeries.fixed(cfg.financing.fixed_rate, date(1970, 1, 1)))
+        cash_rate = series.rate
     cash = cfg.portfolio.cash
     min_cash = cfg.allocation.constraints.min_cash
     benchmarks = [
-        buy_and_hold(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash),
-        monthly_inverse_vol(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash),
+        buy_and_hold(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash, cash_rate=cash_rate),
+        monthly_inverse_vol(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash,
+                            cash_rate=cash_rate),
     ]
 
     for name, weights in FIXED_BENCHMARKS:
-        b = monthly_fixed(name, days, prices, weights, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash)
+        b = monthly_fixed(name, days, prices, weights, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash,
+                          cash_rate=cash_rate)
         if b is not None:
             benchmarks.append(b)
 
@@ -328,7 +383,9 @@ def run_backtest(
         runs = [r for r in engine_runs if r.kind == f"engine:{v}"]
         rows.extend(row(r, eval_start, eval_end, fx) for r in runs)
         if len(runs) > 1:
-            wf, folds = walk_forward(runs, eval_start, eval_end, runs[default_index])
+            # Sélection : sous la limite de drawdown de la variante si elle en a une.
+            limit = max_drawdown or VARIANTS[v].get("allocation.drawdown_control")
+            wf, folds = walk_forward(runs, eval_start, eval_end, runs[default_index], max_drawdown=limit)
             wf.name = f"{VARIANT_LABELS[v]} — walk-forward (hors échantillon)"
             r = row(wf, eval_start, eval_end, fx)
             r["metrics"]["turnover"] = None             # dépend des runs choisis, cf. folds
@@ -476,19 +533,22 @@ def _row_line(r: dict) -> str:
     halts = "–" if not s else f"{s.get('halts', 0)} ({_pct(s.get('halted_share'), 0)})"
     if s and s.get("halt_reasons"):
         halts += " " + ", ".join(f"{k}×{n}" for k, n in sorted(s["halt_reasons"].items()))
+    expo = "–" if not s or "avg_gross" not in s else f"{s['avg_gross']:.2f} / {s['max_gross']:.2f}"
+    fin = "–" if not s or "financing_cost" not in s else f"-{s['financing_cost']:,.0f} / +{s['interest_earned']:,.0f}"
     ci = (r.get("sharpe_ci") or {})
     sharpe = _num(m.get("sharpe"))
     if ci.get("low") is not None:
         sharpe += f" [{_num(ci['low'])} ; {_num(ci['high'])}]"
     return (f"| {r['name']} | {_pct(m.get('cagr'))} | {_pct(m.get('vol'))} | {sharpe} | "
             f"{_pct(m.get('max_drawdown'))} | {_pct(m.get('cagr_eur'))} | {_pct(m.get('max_drawdown_eur'))} | "
-            f"{_num(m.get('turnover'))} | {_num(m.get('transaction_tax'), 0)} | {halts} |")
+            f"{_num(m.get('turnover'))} | {_num(m.get('transaction_tax'), 0)} | {expo} | {fin} | {halts} |")
 
 
 def format_report(report: dict) -> str:
     ccy, tccy = report["currency"], report.get("tax_currency") or ""
     header = (f"| Stratégie | CAGR {ccy} | Vol | Sharpe [IC 90 %] | Max DD | CAGR EUR | Max DD EUR | "
-              f"Turnover/an | TOB {tccy} | Arrêts |\n|---|---|---|---|---|---|---|---|---|---|")
+              f"Turnover/an | TOB {tccy} | Expo. brute moy./max | Financement {ccy} | Arrêts |\n"
+              "|---|---|---|---|---|---|---|---|---|---|---|---|")
     prov = report.get("provenance") or {}
     lines = [
         f"Backtest {report['symbols']} — données {report['bars_start']} → {report['bars_end']}, "

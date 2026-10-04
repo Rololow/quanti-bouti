@@ -78,7 +78,7 @@ class ConstraintEngine:
                 binding.append(f"SECTOR:{sector}")
 
         # 3. exposition brute / cash minimum
-        gross_cap = min(c.max_gross, 1.0 - c.min_cash)
+        gross_cap = gross_cap_of(c)
         gross = float(np.abs(w).sum())
         if gross > gross_cap > 0:
             w *= gross_cap / gross
@@ -107,6 +107,13 @@ class ConstraintEngine:
         weights = {s: float(v) for s, v in zip(symbols, w)}
         adjustments = {s: float(v - r) for s, v, r in zip(symbols, w, requested)}
         return ConstrainedTarget(weights, adjustments, tuple(binding))
+
+
+def gross_cap_of(c: "Constraints") -> float:
+    """Exposition brute maximale. Sans levier (max_gross <= 1), le cash minimum
+    s'en déduit ; avec levier, max_gross fait foi (le cash peut être négatif :
+    emprunt / marge, financé)."""
+    return c.max_gross if c.max_gross > 1.0 else min(c.max_gross, 1.0 - c.min_cash)
 
 
 def fit_gross_after_freeze(

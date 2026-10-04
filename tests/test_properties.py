@@ -10,7 +10,7 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
-from trading_engine.allocation.constraints import ConstraintEngine, Constraints, fit_gross_after_freeze
+from trading_engine.allocation.constraints import ConstraintEngine, Constraints, fit_gross_after_freeze, gross_cap_of
 from trading_engine.allocation.risk_parity import risk_budget_weights
 from trading_engine.backtest.dataset import synthetic_trades
 from trading_engine.config import load_config
@@ -59,7 +59,8 @@ def test_constraint_engine_always_respects_limits(targets, max_weight, min_cash,
     eps = 1e-9
     assert np.all(np.isfinite(w))
     assert np.all(w <= max_weight + eps) and np.all(w >= c.min_weight - eps)
-    assert np.abs(w).sum() <= max(min(max_gross, 1 - min_cash), 0) + eps or min(max_gross, 1 - min_cash) <= 0
+    cap = gross_cap_of(c)                     # avec levier (max_gross > 1) : max_gross fait foi
+    assert np.abs(w).sum() <= max(cap, 0) + eps or cap <= 0
     assert abs(out.get("A", 0)) + abs(out.get("B", 0)) <= sector_limit + eps
     if max_vol is not None:
         assert portfolio_vol(w, cov) <= max_vol * (1 + 1e-6)

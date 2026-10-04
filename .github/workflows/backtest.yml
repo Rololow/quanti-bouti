@@ -17,10 +17,16 @@ on:
         default: ""
       grid:
         description: "Grille du walk-forward"
-        default: "decision.holding_period=20d,60d,120d"
+        default: "allocation.target_vol=0.08,0.12,0.16"
       variants:
         description: "Variantes du moteur"
-        default: "sans_modeles,classes"
+        default: "lev15,lev30,lev15_actions,lev30_actions"
+      overlays:
+        description: "Surcouches supplémentaires (séparées par des espaces)"
+        default: "config/leverage.yaml"
+      scenarios:
+        description: "Scénarios fiscaux : ucits, us"
+        default: "ucits"
   schedule:
     - cron: "17 6 * * 1"
   pull_request:
@@ -31,6 +37,8 @@ on:
       - "trading_engine/tax/fx.py"
       - "config/universe_wide.yaml"
       - "config/tax_ucits.yaml"
+      - "config/leverage.yaml"
+      - "trading_engine/portfolio/financing.py"
 
 permissions:
   contents: read
@@ -46,8 +54,10 @@ jobs:
     env:
       START: ${{ inputs.start || '2006-03-01' }}
       SYMBOLS: ${{ inputs.symbols || '' }}
-      GRID: ${{ inputs.grid || 'decision.holding_period=20d,60d,120d' }}
-      VARIANTS: ${{ inputs.variants || 'sans_modeles,classes' }}
+      GRID: ${{ inputs.grid || 'allocation.target_vol=0.08,0.12,0.16' }}
+      VARIANTS: ${{ inputs.variants || 'lev15,lev30,lev15_actions,lev30_actions' }}
+      EXTRA: ${{ inputs.overlays || 'config/leverage.yaml' }}
+      SCENARIOS: ${{ inputs.scenarios || 'ucits' }}
       # Univers : 8 ETF, 3 classes d'actifs (DBC coté depuis février 2006).
       UNIVERSE: config/universe_wide.yaml
     steps:
@@ -62,14 +72,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/backtest
-          key: daily-v3-${{ env.START }}-${{ env.SYMBOLS }}-${{ github.run_id }}
-          restore-keys: daily-v3-${{ env.START }}-${{ env.SYMBOLS }}-
+          key: daily-v4-${{ env.START }}-${{ env.SYMBOLS }}-${{ github.run_id }}
+          restore-keys: daily-v4-${{ env.START }}-${{ env.SYMBOLS }}-
       - name: Données quotidiennes
         run: |
           set -o pipefail
           args=(--start "$START")
           if [ -n "$SYMBOLS" ]; then args+=(--symbols "$SYMBOLS"); fi
-          if [ -f data/backtest/daily.jsonl.fx.json ] && [ -n "$(find data/backtest/daily.jsonl -mtime -7)" ]; then
+          if [ -f data/backtest/daily.jsonl.fx.json ] && [ -f data/backtest/daily.jsonl.rates.json ] \
+             && [ -n "$(find data/backtest/daily.jsonl -mtime -7)" ]; then
             echo "données en cache (moins d'une semaine)"
           else
             python -m trading_engine.backtest --overlay "$UNIVERSE" download-daily "${args[@]}" --source yahoo \
@@ -85,18 +96,25 @@ jobs:
           python -m trading_engine.backtest --overlay "$UNIVERSE" --overlay config/tax_ucits.yaml import-csv "${files[@]}" \
             --net-dividends --no-fx --out data/backtest/daily_ucits.jsonl
           for d in daily_us daily_ucits; do
-            if [ -f data/backtest/daily.jsonl.fx.json ]; then
-              cp data/backtest/daily.jsonl.fx.json "data/backtest/$d.jsonl.fx.json"
-            fi
+            for kind in fx rates; do
+              if [ -f "data/backtest/daily.jsonl.$kind.json" ]; then
+                cp "data/backtest/daily.jsonl.$kind.json" "data/backtest/$d.jsonl.$kind.json"
+              fi
+            done
           done
       - name: Backtest — ETF US distribuants (précompte 30 %, TOB 0,35 %)
+        if: contains(env.SCENARIOS, 'us')
         run: |
-          python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay "$UNIVERSE" run \
+          extra=(); for o in $EXTRA; do extra+=(--overlay "$o"); done
+          python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay "$UNIVERSE" "${extra[@]}" run \
             --data data/backtest/daily_us.jsonl --grid "$GRID" --variants "$VARIANTS" \
             --out data/backtest/report_us.json
       - name: Backtest — UCITS capitalisants (Reynders, TOB 0,12 %)
+        if: contains(env.SCENARIOS, 'ucits')
         run: |
-          python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay "$UNIVERSE" --overlay config/tax_ucits.yaml run \
+          extra=(); for o in $EXTRA; do extra+=(--overlay "$o"); done
+          python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay "$UNIVERSE" \
+            --overlay config/tax_ucits.yaml "${extra[@]}" run \
             --data data/backtest/daily_ucits.jsonl --grid "$GRID" --variants "$VARIANTS" \
             --out data/backtest/report_ucits.json
       - name: Rapports dans le résumé

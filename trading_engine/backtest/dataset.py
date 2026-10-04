@@ -41,6 +41,12 @@ def meta_path(dataset: str | Path) -> Path:
     return dataset.with_name(dataset.name + ".meta.json")
 
 
+def rates_path(dataset: str | Path) -> Path:
+    """Taux courts (T-bill) de la période, pour le financement."""
+    dataset = Path(dataset)
+    return dataset.with_name(dataset.name + ".rates.json")
+
+
 def fx_path(dataset: str | Path) -> Path:
     dataset = Path(dataset)
     return dataset.with_name(dataset.name + ".fx.json")

@@ -1,0 +1,33 @@
+# Surcouche : levier (jusqu'à 2×) avec contrôle du drawdown.
+#
+# Le levier est représenté par des positions financées au taux court + 0,5 %
+# (≈ financement implicite des futures sur indices / Treasuries ; un prêt sur
+# marge chez un broker coûte nettement plus : ajuster financing.borrow_spread).
+# Le contrôle du drawdown (Grossman-Zhou) réduit l'exposition à mesure que la
+# perte depuis le plus haut approche la limite ; le Safety Engine arrête tout à
+# la limite (risk.limits.max_drawdown).
+#
+# À utiliser avec config/universe_wide.yaml (classes d'actifs).
+
+allocation:
+  method: class_parity
+  target_vol: 0.12
+  drawdown_control: 0.15
+  constraints:
+    max_gross: 2.0
+    max_weight: 0.80
+    sector_limits: {equity: 1.0}
+
+financing:
+  enabled: true
+  borrow_spread: 0.005
+
+hard_controls:
+  max_target_weight: 0.80
+  max_target_gross: 2.0
+
+risk:
+  limits:
+    max_gross_leverage: 2.05
+    max_weight: 0.85
+    max_drawdown: 0.15

@@ -57,8 +57,11 @@ def check_portfolio(
     value = cash + sum(q * p for q, p in positions.values())
     if not value > 0:
         return [Violation("FINITE", f"valeur du portefeuille {value:,.2f} <= 0")]
-    if cash < -cash_tolerance * value:
-        out.append(Violation("CASH", f"cash {cash:,.2f} < -{cash_tolerance:.0%} de {value:,.2f}"))
+    # Avec levier autorisé (max_gross > 1), le cash peut descendre jusqu'à
+    # -(max_gross - 1) × valeur (emprunt) ; au-delà, levier involontaire.
+    floor = (max(0.0, max_gross - 1.0) + cash_tolerance) * value
+    if cash < -floor:
+        out.append(Violation("CASH", f"cash {cash:,.2f} < -{floor:,.2f} (levier max {max_gross:g})"))
     gross = sum(abs(q * p) for q, p in positions.values()) / value
     if gross > max_gross + gross_tolerance:
         out.append(Violation("GROSS", f"exposition brute {gross:.3f} > {max_gross:.3f}"))
