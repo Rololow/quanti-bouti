@@ -18,9 +18,10 @@ import bisect
 import csv
 import io
 import logging
+import time
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable, Mapping
 
 logger = logging.getLogger(__name__)
@@ -85,25 +86,41 @@ class FxRates:
 
 def _http_get(url: str) -> str:
     req = urllib.request.Request(url, headers={"Accept": "text/csv"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         return resp.read().decode("utf-8")
 
 
 def fetch_ecb_rates(
-    quote: str, start: date, end: date, *, http_get: Callable[[str], str] = _http_get
+    quote: str, start: date, end: date, *, http_get: Callable[[str], str] = _http_get,
+    chunk_years: int = 5, retries: int = 3, sleep: Callable[[float], None] = time.sleep,
 ) -> FxRates:
-    """Taux de référence BCE : `quote` par EUR entre deux dates incluses."""
+    """Taux de référence BCE : `quote` par EUR entre deux dates incluses.
+
+    Par tranches de `chunk_years` ans (une requête sur 20 ans dépasse souvent
+    le délai de l'API), chaque tranche retentée `retries` fois."""
     if quote == "EUR":
         raise ValueError("quote currency must differ from EUR")
-    query = urllib.parse.urlencode({"startPeriod": start.isoformat(), "endPeriod": end.isoformat(),
-                                    "format": "csvdata"})
-    text = http_get(f"{ECB_URL.format(quote=quote)}?{query}")
     rates: dict[date, float] = {}
-    for row in csv.DictReader(io.StringIO(text)):
-        value = (row.get("OBS_VALUE") or "").strip()
-        period = (row.get("TIME_PERIOD") or "").strip()
-        if value and period:
-            rates[date.fromisoformat(period)] = float(value)
+    cursor = start
+    while cursor <= end:
+        stop = min(end, date(cursor.year + chunk_years, 1, 1) - timedelta(days=1))
+        query = urllib.parse.urlencode({"startPeriod": cursor.isoformat(), "endPeriod": stop.isoformat(),
+                                        "format": "csvdata"})
+        for attempt in range(1, retries + 1):
+            try:
+                text = http_get(f"{ECB_URL.format(quote=quote)}?{query}")
+                break
+            except Exception as exc:
+                if attempt == retries:
+                    raise
+                logger.warning("ECB %s..%s attempt %d failed: %s", cursor, stop, attempt, exc)
+                sleep(2.0 * attempt)
+        for row in csv.DictReader(io.StringIO(text)):
+            value = (row.get("OBS_VALUE") or "").strip()
+            period = (row.get("TIME_PERIOD") or "").strip()
+            if value and period:
+                rates[date.fromisoformat(period)] = float(value)
+        cursor = stop + timedelta(days=1)
     if not rates:
         raise LookupError(f"ECB returned no EUR/{quote} rate between {start} and {end}")
     return FxRates("EUR", quote, rates, source="ecb")

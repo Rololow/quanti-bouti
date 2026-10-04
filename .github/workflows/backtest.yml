@@ -28,6 +28,7 @@ on:
       - ".github/workflows/backtest.yml"
       - "trading_engine/backtest/**"
       - "config/backtest_daily.yaml"
+      - "trading_engine/tax/fx.py"
 
 permissions:
   contents: read
@@ -64,7 +65,7 @@ jobs:
           set -o pipefail
           args=(--start "$START")
           if [ -n "$SYMBOLS" ]; then args+=(--symbols "$SYMBOLS"); fi
-          if [ -f data/backtest/daily.jsonl ] && [ -n "$(find data/backtest/daily.jsonl -mtime -7)" ]; then
+          if [ -f data/backtest/daily.jsonl.fx.json ] && [ -n "$(find data/backtest/daily.jsonl -mtime -7)" ]; then
             echo "données en cache (moins d'une semaine)"
           else
             python -m trading_engine.backtest download-daily "${args[@]}" --source yahoo \

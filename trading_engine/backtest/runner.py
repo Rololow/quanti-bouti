@@ -357,7 +357,9 @@ def run_backtest(
         "cost_stress": {"multiplier": cost_stress, "rows": stress_rows} if stress_rows else None,
         "crises": [{"name": n, "start": a, "end": b} for n, a, b in stats.CRISES if b >= eval_start and a <= eval_end],
         "provenance": provenance(dataset, config, overlays, grid, variants, cost_stress),
-        "caveats": CAVEATS,
+        "caveats": (CAVEATS if fx is None or fx.source != "fixed" else
+                    [f"Taux BCE indisponibles : EUR/USD fixe {cfg.fx.fixed_rate} — les colonnes EUR et la TOB "
+                     "ne reflètent pas le vrai change."] + CAVEATS),
     }
 
 

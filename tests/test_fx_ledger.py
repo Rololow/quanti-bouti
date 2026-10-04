@@ -252,3 +252,20 @@ def test_ledger_events_roundtrip():
                TaxLedgerEvent(timestamp=t, received_at=t, symbol=None, source="tax_ledger",
                               payload={"source": "config", "ledger": _model().snapshot()})):
         assert dumps(loads(dumps(ev))) == dumps(ev)
+
+
+def test_ecb_rates_fetched_in_chunks_with_retries():
+    calls = []
+
+    def get(url):
+        calls.append(url)
+        if len(calls) == 2:
+            raise TimeoutError("The read operation timed out")
+        start = url.split("startPeriod=")[1][:10]
+        return f"TIME_PERIOD,OBS_VALUE\n{start},1.2\n"
+
+    fx = fetch_ecb_rates("USD", date(2005, 1, 1), date(2016, 6, 30), http_get=get, sleep=lambda s: None)
+    periods = [u.split("startPeriod=")[1][:10] for u in calls]
+    assert periods == ["2005-01-01", "2010-01-01", "2010-01-01", "2015-01-01"]
+    assert "endPeriod=2009-12-31" in calls[0] and "endPeriod=2016-06-30" in calls[-1]
+    assert len(fx) == 3 and fx.source == "ecb"

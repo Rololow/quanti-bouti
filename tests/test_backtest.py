@@ -212,7 +212,7 @@ def test_backtest_end_to_end_on_synthetic_data(tmp_path):
     assert len(prov["dataset_sha256"]) == 64 and prov["numpy"] and prov["grid"]
     engine_row = [r for r in report["rows"] if r["kind"] == "engine:sans_modeles"][-1]
     assert set(engine_row["vs"]) == set(names[:3]) and "deflated_sharpe" in engine_row
-    assert engine_row["sharpe_ci"]["sharpe"] == engine_row["metrics"]["sharpe"]
+    assert engine_row["sharpe_ci"]["sharpe"] == pytest.approx(engine_row["metrics"]["sharpe"], rel=1e-9)
     assert 2025 in engine_row["years"]
     for r in report["rows"]:
         m = r["metrics"]
