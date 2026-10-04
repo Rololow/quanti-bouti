@@ -79,6 +79,7 @@ from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
 from trading_engine.robustness.stress import StressReport, stress_test
+from trading_engine.safety.invariants import InvariantMonitor
 from trading_engine.safety.safety_engine import SafetyEngine, SafetyState, SafetyStatus
 from trading_engine.storage.decision_log import DecisionLogWriter
 from trading_engine.storage.event_log import EventLogWriter
@@ -184,6 +185,16 @@ class Engine:
         self._injected: list = []            # événements produits par le moteur (sync, rapprochement)
         self.remote_errors = 0
         self.taxes_outside_broker = 0.0      # taxes dues mais non prélevées par le broker
+        sc = config.safety
+        self.invariants = InvariantMonitor(sc.invariants, cash_tolerance=sc.invariant_cash_tolerance,
+                                           gross_tolerance=sc.invariant_gross_tolerance)
+        self._active_invariants: set[str] = set()
+        # Fills broker appliqués par ordre : (quantité cumulée, valeur cumulée).
+        self._applied_fills: dict[str, tuple[float, float]] = {}
+        self.ignored_order_updates = 0
+        # Compte broker : aucun ordre tant que l'état réel n'a pas été lu (sinon le
+        # moteur calculerait ses ordres sur les positions de la config).
+        self.account_synced = not (self.remote_broker is not None and ex.sync_portfolio)
         # Séances de marché : reçues comme CalendarEvent (journalisé).
         self.calendar: MarketCalendar | None = None
         self.market_block: str | None = None  # raison de ne pas trader au dernier intervalle
@@ -461,11 +472,31 @@ class Engine:
             await self._publish_decision(decision)
             if decision.action == "UREBALANCE" and self.config.execution.mode != "off":
                 await self.execute(self.plan_execution(decision, status))
-        if (self.remote_broker is not None and self.config.execution.reconcile
+        if self.remote_broker is not None and not self.account_synced:
+            await self._fetch_account("sync")             # nouvelle tentative
+        elif (self.remote_broker is not None and self.config.execution.reconcile
                 and not self.remote_broker.working):
             await self._fetch_account("reconcile")
         await self._publish_alerts(status, decision)
         self._record_history(status, decision)
+        await self._check_invariants(status.timestamp)
+
+    async def _check_invariants(self, timestamp: datetime | None) -> None:
+        """Défense en profondeur : état réel vérifié, HALTED si violation."""
+        violations = self.invariants.check(self)
+        names = {v.name for v in violations}
+        for v in violations:
+            if v.name not in self._active_invariants:      # une alerte par apparition
+                self.alerts.append(Alert("INVARIANT", None, timestamp, str(v), "critical"))
+                logger.error("invariant violated: %s", v)
+        self._active_invariants = names
+        if violations and self.invariants.mode == "halt" and self.safety.state is not SafetyState.HALTED:
+            self.safety.halt("INVARIANT " + ",".join(sorted(names)), timestamp)
+            if self.broker is not None:
+                for wo in self.broker.cancel_all():
+                    self.execution_feedback.on_order_closed(wo.order, wo.filled, wo.average_price)
+            if self.remote_broker is not None:
+                await self.remote_broker.cancel_all()
 
     def _record_history(self, status: SafetyStatus, decision: Decision | None) -> None:
         state = self._raw_snapshot()
@@ -580,6 +611,12 @@ class Engine:
         for order in plan.orders:
             self._orders_by_cid[client_order_id(order)] = order
         if self.remote_broker is not None:
+            if not self.account_synced:
+                if not any(a.kind == "BROKER_UNSYNCED" for a in self.alerts):
+                    self.alerts.append(Alert("BROKER_UNSYNCED", None, plan.timestamp,
+                                             "compte broker non synchronisé : aucun ordre envoyé", "critical"))
+                logger.warning("account not synchronized: plan %s not sent", plan.decision_id)
+                return
             await self.remote_broker.cancel_all()
             for order in plan.orders:
                 if await self.remote_broker.submit(order) is None:
@@ -621,6 +658,8 @@ class Engine:
         kind = data.get("kind")
         if kind not in ("sync", "reconcile"):
             return
+        if kind == "sync":
+            self.account_synced = True
         if data.get("trading_blocked") or data.get("status") not in (None, "ACTIVE"):
             self.safety.halt(f"BROKER_ACCOUNT {data.get('status')} blocked={data.get('trading_blocked')}",
                              event.timestamp)
@@ -668,14 +707,36 @@ class Engine:
                                          "warning"))
             self._save_ledger()
 
+    def _apply_broker_fill(self, event: OrderUpdateEvent) -> None:
+        """Applique la partie **nouvelle** d'un ordre, d'après sa quantité
+        cumulée : une mise à jour dupliquée ou arrivée en retard (cumul déjà
+        atteint) est ignorée, une mise à jour manquée est rattrapée."""
+        cid = event.client_order_id
+        done_qty, done_value = self._applied_fills.get(cid, (0.0, 0.0))
+        total_qty = event.filled_qty if event.filled_qty > 0 else done_qty + (event.fill_qty or 0.0)
+        delta = total_qty - done_qty
+        if delta <= 1e-9:
+            self.ignored_order_updates += 1
+            return
+        price = None
+        if event.filled_avg_price and event.filled_avg_price > 0:
+            price = (total_qty * event.filled_avg_price - done_value) / delta
+        if price is None or not math.isfinite(price) or price <= 0:
+            price = event.fill_price
+        if price is None or not math.isfinite(price) or price <= 0:
+            self.ignored_order_updates += 1
+            logger.warning("fill without usable price ignored: %s", cid)
+            return
+        self._applied_fills[cid] = (total_qty, done_value + delta * price)
+        signed = delta if event.side == "buy" else -delta
+        order = self._orders_by_cid.get(cid)
+        self.fills.append(Fill(event.symbol, signed, price, event.timestamp,
+                               order.decision_id if order is not None else None))
+        self.record_fill(event.symbol, signed, price, event.timestamp, tax_in_cash=False)
+
     def _on_order_update(self, event: OrderUpdateEvent) -> None:
-        if event.update in ("fill", "partial_fill") and event.fill_qty and event.fill_price:
-            signed = event.fill_qty if event.side == "buy" else -event.fill_qty
-            order = self._orders_by_cid.get(event.client_order_id)
-            fill = Fill(event.symbol, signed, event.fill_price, event.timestamp,
-                        order.decision_id if order is not None else None)
-            self.fills.append(fill)
-            self.record_fill(event.symbol, signed, event.fill_price, event.timestamp, tax_in_cash=False)
+        if event.update in ("fill", "partial_fill"):
+            self._apply_broker_fill(event)
         if event.update == "rejected":
             self.safety.record_hard_control_rejection(event.timestamp, f"BROKER_REJECTED {event.client_order_id}")
         if event.terminal:
@@ -1082,6 +1143,8 @@ class Engine:
             # Événements du compte broker et calendrier : pas des données de
             # marché (ils ne doivent pas rafraîchir la fraîcheur d'un symbole).
             await self.bus.publish(event)
+            if isinstance(event, (OrderUpdateEvent, PortfolioEvent)):
+                await self._check_invariants(event.timestamp)
             return
         checked = self.integrity.check(event)
         for issue in checked.issues:

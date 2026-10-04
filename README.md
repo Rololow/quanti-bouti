@@ -195,6 +195,31 @@ registre sont gardés ; seuls les écarts avec le compte sont corrigés, avec
 une alerte `TAX_LEDGER`. Taux et registre sont journalisés : le replay
 repart des mêmes valeurs.
 
+### Invariants et tests de chaos
+
+Les contrôles amont (contraintes, hard controls, dimensionnement des ordres)
+doivent garantir certaines propriétés ; un **moniteur d'invariants** vérifie
+quand même l'état réel après chaque intervalle et chaque événement du compte
+broker : valeurs finies, cash pas négatif (au-delà de 1 %), exposition brute
+dans la limite, aucune position courte en long-only, cible conforme aux hard
+controls, lots fiscaux égaux aux positions, aucune exception dans un
+gestionnaire d'événement. Une violation (`safety.invariants: halt`) met le
+moteur en HALTED, annule ses ordres et lève une alerte `INVARIANT` critique ;
+rien n'est liquidé. `alert` se contente de l'alerte.
+
+Côté broker, les fills sont appliqués d'après la **quantité cumulée** de
+chaque ordre : une mise à jour dupliquée ou en retard est ignorée, une mise à
+jour perdue est rattrapée par la suivante. Tant que le compte n'a jamais été
+lu (synchronisation en échec), aucun ordre n'est envoyé (alerte
+`BROKER_UNSYNCED`) et la lecture est retentée à chaque intervalle.
+
+Tests : `tests/test_properties.py` (hypothesis : contraintes, hard controls,
+gel de symboles, risk parity, lots fiscaux, change, calendrier, journal, fills
+dupliqués/perdus/désordonnés, moteur complet sur des marchés et des configs
+aléatoires) et `tests/test_chaos.py` (flux `trade_updates` dupliqué, perdu ou
+coupé, rejets broker en rafale, compte injoignable ou bloqué en séance,
+position broker corrompue, exception interne, état corrompu).
+
 ### Calendrier de marché
 
 Avec le flux Alpaca, le moteur charge les séances officielles (`/v2/calendar`,
@@ -2820,6 +2845,8 @@ Le moteur :
 [x] Change EUR/USD (cours BCE) dans la fiscalité
 [x] Registre fiscal persistant (lots datés, plus-values, TOB à déclarer)
 [x] Backtest sur données historiques (références, walk-forward, rapport USD/EUR)
+[x] Moniteur d'invariants (HALTED sur violation), fills broker idempotents
+[x] Tests de propriétés (hypothesis) et tests de chaos
 ```
 
 ## Phase 14 — Dashboard

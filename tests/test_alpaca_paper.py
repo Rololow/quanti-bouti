@@ -354,6 +354,7 @@ def _run_with_fake_alpaca(cfg, client):
     faux compte entrent comme ceux du flux websocket (journalisés)."""
     e = Engine(cfg)
     e.remote_broker = AlpacaPaperBroker(client)
+    e.account_synced = False                 # comme en mode alpaca_paper : sync requise
     sink = client.sink
 
     orig_drain = e._drain_injected

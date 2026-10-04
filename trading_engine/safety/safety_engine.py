@@ -45,6 +45,9 @@ class SafetyConfig:
     recovery_intervals: int = 3
     corporate_action_hold: float = 86400.0  # secondes de gel après une corporate action probable
     degraded_rebalance_factor: float = 0.5  # fraction du chemin vers la cible en DEGRADED
+    invariants: str = "halt"                # halt | alert | off (voir safety/invariants.py)
+    invariant_cash_tolerance: float = 0.01  # cash >= -1 % de la valeur
+    invariant_gross_tolerance: float = 0.02  # exposition brute <= limite + 2 %
 
 
 @dataclass(frozen=True)

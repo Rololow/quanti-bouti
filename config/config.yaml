@@ -211,6 +211,12 @@ safety:
   recovery_intervals: 3            # évaluations saines avant DEGRADED -> NORMAL
   corporate_action_hold: 86400     # s de gel d'un symbole après un split probable
   degraded_rebalance_factor: 0.5
+  # Invariants vérifiés après chaque intervalle et chaque événement du compte
+  # (cash, exposition, positions courtes, cible, lots fiscaux, exceptions).
+  # halt : HALTED + annulation des ordres + alerte ; alert : alerte seule.
+  invariants: halt
+  invariant_cash_tolerance: 0.01
+  invariant_gross_tolerance: 0.02
 
 # Veto final, indépendant des modèles et du Constraint Engine.
 hard_controls:
