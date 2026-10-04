@@ -426,9 +426,11 @@ def provenance(dataset: Path, config, overlays, grid, variants, cost_stress) -> 
 
 
 CAVEATS = [
-    "Barres 30 min rejouées en trades synthétiques (O, plus bas/haut, C) : le chemin intra-barre est approximé.",
+    "Barres historiques rejouées en trades synthétiques (O, plus bas/haut, C) : le chemin intra-barre est approximé.",
     "Pas de cotations historiques : spread = spread par défaut du modèle de coûts.",
-    "Prix ajustés (adjustment=all) : dividendes réinvestis implicitement, précompte et retenue US non déduits.",
+    "Prix ajustés des dividendes (Alpaca adjustment=all ou Adj Close Yahoo) : dividendes réinvestis "
+    "implicitement, précompte et retenue US non déduits.",
+    "Point de vue EUR : le cash est en USD ; un portefeuille resté en cash subit tout le change EUR/USD.",
     "Impôt sur les plus-values non déduit des séries (estimé séparément par le moteur) ; TOB déduite.",
     "Références exécutées à la clôture avec fractions d'actions : hypothèse favorable aux références.",
     "Sharpe/Sortino avec taux sans risque nul.",
