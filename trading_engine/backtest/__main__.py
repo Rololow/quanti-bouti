@@ -8,6 +8,10 @@
 
     # sans clé : dataset synthétique pour vérifier la chaîne (aucun edge)
     python -m trading_engine.backtest synthetic --start 2022-01-01 --end 2024-12-31
+
+    # historique quotidien long (CSV Stooq / Yahoo, un fichier par symbole)
+    python -m trading_engine.backtest import-csv SPY=spy_us_d.csv QQQ=qqq_us_d.csv TLT=tlt_us_d.csv GLD=gld_us_d.csv
+    python -m trading_engine.backtest --overlay config/backtest_daily.yaml run --data data/backtest/daily.jsonl
 """
 
 from __future__ import annotations
@@ -15,7 +19,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date
+import json
+from datetime import date, timedelta
 from pathlib import Path
 
 from trading_engine.config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load_config, resolve_path
@@ -55,13 +60,31 @@ def main(argv: list[str] | None = None) -> int:
     syn.add_argument("--seed", type=int, default=0)
     syn.add_argument("--out", default="data/backtest/synthetic_30m.jsonl")
 
+    dd = sub.add_parser("download-daily", help="historique quotidien gratuit (Yahoo ou Stooq) -> dataset 1d")
+    dd.add_argument("--start", type=_date, default=date(2005, 1, 1))
+    dd.add_argument("--end", type=_date, default=date.today())
+    dd.add_argument("--symbols")
+    dd.add_argument("--source", choices=["yahoo", "stooq"], default="yahoo")
+    dd.add_argument("--no-fx", action="store_true", help="ne pas télécharger les taux BCE")
+    dd.add_argument("--out", default="data/backtest/daily.jsonl")
+
+    imp = sub.add_parser("import-csv", help="CSV quotidiens (Stooq, Yahoo) -> dataset 1d")
+    imp.add_argument("files", nargs="+", help="SYMBOLE=chemin.csv")
+    imp.add_argument("--start", type=_date)
+    imp.add_argument("--end", type=_date)
+    imp.add_argument("--no-fx", action="store_true", help="ne pas télécharger les taux BCE")
+    imp.add_argument("--out", default="data/backtest/daily.jsonl")
+
     run = sub.add_parser("run", help="lance le backtest")
     run.add_argument("--data", default=DEFAULT_DATASET)
     run.add_argument("--eval-start", type=_date, help="début de l'évaluation (défaut : 1 an après le début)")
     run.add_argument("--eval-end", type=_date)
     run.add_argument("--grid", action="append", default=None,
                      help="paramètre=valeurs, répétable (défaut : " + DEFAULT_GRID[0] + ")")
-    run.add_argument("--variants", default="complet,sans_modeles")
+    run.add_argument("--variants", default="complet,sans_modeles,seance")
+    run.add_argument("--cost-stress", type=float, default=2.0,
+                     help="multiplicateur des coûts pour le stress (0 = désactivé)")
+    run.add_argument("--bootstrap", type=int, default=2000, help="tirages du bootstrap")
     run.add_argument("--workers", type=int, help="processus en parallèle (défaut : nombre de CPU)")
     run.add_argument("--out", default="data/backtest/report.json")
     args = parser.parse_args(argv)
@@ -81,6 +104,38 @@ def main(argv: list[str] | None = None) -> int:
         print(summary)
         return 0
 
+    if args.command in ("import-csv", "download-daily"):
+        from trading_engine.backtest.dataset import fx_path, import_daily_csv
+        from trading_engine.tax.fx import fetch_ecb_rates
+
+        out = resolve_path(args.out)
+        if args.command == "download-daily":
+            from trading_engine.backtest.sources import download_csvs
+
+            files = download_csvs(symbols, args.start, args.end, out.parent / f"csv_{args.source}",
+                                  source=args.source)
+        else:
+            files = {}
+            for item in args.files:
+                sym, _, file = item.partition("=")
+                if not file:
+                    parser.error(f"expected SYMBOLE=chemin.csv, got {item!r}")
+                files[sym.strip().upper()] = file
+        summary = import_daily_csv(files, out, start=args.start, end=args.end)
+        if not summary["bars"]:
+            print(summary)
+            return 1
+        if not args.no_fx and summary["bars"]:
+            try:
+                rates = fetch_ecb_rates("USD", date.fromisoformat(summary["start"]) - timedelta(days=10),
+                                        date.fromisoformat(summary["end"]))
+                fx_path(out).write_text(json.dumps(rates.to_payload()), encoding="utf-8")
+                summary["fx"] = len(rates)
+            except Exception as exc:             # le backtest utilisera le taux fixe
+                summary["fx"] = f"non téléchargé ({exc})"
+        print(summary)
+        return 0
+
     if args.command == "synthetic":
         from trading_engine.backtest.dataset import write_synthetic_dataset
 
@@ -94,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     report = run_backtest(
         args.data, config=args.config, overlays=overlays, eval_start=args.eval_start, eval_end=args.eval_end,
         grid=grid, variants=[v.strip() for v in args.variants.split(",") if v.strip()], workers=args.workers,
+        cost_stress=args.cost_stress, bootstrap_samples=args.bootstrap,
     )
     out = resolve_path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -215,3 +215,60 @@ def write_synthetic_dataset(
                     n += 1
                 t += step
     return n
+
+
+def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: date | None = None,
+                     end: date | None = None) -> dict:
+    """CSV quotidiens (un par symbole) -> dataset de barres 1d sur les séances NYSE.
+
+    Colonnes reconnues (casse ignorée) : Date, Open, High, Low, Close, Volume
+    et, si présente, « Adj Close » : OHLC sont alors multipliés par
+    Adj Close / Close (dividendes réinvestis, comme `adjustment=all`).
+    Format Stooq (`Date,Open,High,Low,Close,Volume`) et Yahoo acceptés.
+    Une barre couvre la séance (ouverture -> clôture, 13h00 les veilles de fête).
+    """
+    import csv
+
+    bars: list[BarEvent] = []
+    skipped: dict[str, int] = {}
+    for sym, file in sorted(files.items()):
+        with open(file, encoding="utf-8-sig", newline="") as fh:
+            reader = csv.DictReader(fh)
+            cols = {c.strip().lower(): c for c in (reader.fieldnames or [])}
+            missing = [c for c in ("date", "open", "high", "low", "close") if c not in cols]
+            if missing:
+                raise ValueError(f"{file}: missing columns {missing}")
+            rows = list(reader)
+        days = [date.fromisoformat(r[cols["date"]].strip()[:10]) for r in rows]
+        if not days:
+            continue
+        calendar = MarketCalendar.from_rules(min(days), max(days))
+        for r, day in zip(rows, days):
+            if (start and day < start) or (end and day > end):
+                continue
+            try:
+                o, h, low, c = (float(r[cols[k]]) for k in ("open", "high", "low", "close"))
+                v = float(r[cols["volume"]]) if "volume" in cols and r[cols["volume"]] not in ("", None) else 0.0
+                adj = float(r[cols["adj close"]]) if "adj close" in cols and r[cols["adj close"]] else c
+            except ValueError:
+                skipped[sym] = skipped.get(sym, 0) + 1         # « null », ligne incomplète
+                continue
+            session = calendar.session(day)
+            if session is None or min(o, h, low, c) <= 0 or c <= 0:
+                skipped[sym] = skipped.get(sym, 0) + 1
+                continue
+            k = adj / c
+            o, h, low, c = o * k, max(o, h, low, c) * k, min(o, h, low, c) * k, adj
+            bars.append(BarEvent(timestamp=session.open, end=session.close, received_at=session.close, symbol=sym,
+                                 source="csv_dataset", timeframe="1d", open=o, high=h, low=low, close=c,
+                                 volume=max(v, 0.0)))
+    bars.sort(key=lambda b: (b.timestamp, b.symbol))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with EventLogWriter(path) as writer:
+        for bar in bars:
+            writer.write(bar)
+    return {"path": str(path), "bars": len(bars), "skipped": skipped,
+            "per_symbol": {s: sum(1 for b in bars if b.symbol == s) for s in files},
+            "start": bars[0].timestamp.date().isoformat() if bars else None,
+            "end": bars[-1].timestamp.date().isoformat() if bars else None}
