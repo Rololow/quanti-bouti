@@ -52,6 +52,13 @@ class CapitalGainsTracker:
         self.lots: dict[str, deque[Lot]] = {}
         self.realized: list[RealizedGain] = []
         self._carry: dict[int, float] = {}     # exonération reportée disponible au début de l'année
+        self._net_by_year: dict[int, float] = {}
+
+    def reindex(self) -> None:
+        """Recalcule le cumul annuel après un remplacement de `realized`."""
+        self._net_by_year = {}
+        for g in self.realized:
+            self._net_by_year[g.sold.year] = self._net_by_year.get(g.sold.year, 0.0) + g.gain
 
     # ----------------------------------------------------------------- lots
 
@@ -87,6 +94,20 @@ class CapitalGainsTracker:
                 lots.popleft()
         return covered, basis
 
+    def preview_lots(self, symbol: str, quantity: float) -> list[tuple[float, Lot]]:
+        """Lots (quantité prise, lot) qu'une vente FIFO consommerait."""
+        out, remaining = [], quantity
+        for lot in self.lots.get(symbol, ()):
+            if remaining <= 1e-12:
+                break
+            take = min(lot.quantity, remaining)
+            out.append((take, lot))
+            remaining -= take
+        return out
+
+    def tax_basis(self, symbol: str, lot: Lot) -> float:
+        return self._tax_basis(symbol, lot)
+
     def remove(self, symbol: str, quantity: float) -> float:
         """Retire des lots (FIFO) sans plus-value : titres sortis hors du
         suivi (transfert, écart de synchronisation). Retourne la quantité retirée."""
@@ -106,12 +127,13 @@ class CapitalGainsTracker:
         gain = RealizedGain(symbol, covered, covered * price, basis, when)
         if self.rules.effective_from is None or when >= self.rules.effective_from:
             self.realized.append(gain)
+            self._net_by_year[when.year] = self._net_by_year.get(when.year, 0.0) + gain.gain
         return gain
 
     # ----------------------------------------------------------------- impôt
 
     def net_gain(self, year: int) -> float:
-        return sum(g.gain for g in self.realized if g.sold.year == year)
+        return self._net_by_year.get(year, 0.0)
 
     def exemption(self, year: int) -> float:
         """Exonération disponible : annuelle + réserve reportée.

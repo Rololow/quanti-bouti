@@ -83,6 +83,9 @@ class IncomeTaxRules:
     foreign_withholding: Mapping[str, float] = field(default_factory=dict)
     interest_component_rate: float = 0.0
     interest_component_threshold: float = 1.0
+    # Taxe due à la revente (Reynders) plutôt que chaque année : l'impôt
+    # sur les intérêts capitalisés est reporté jusqu'à la vente.
+    interest_component_at_sale: bool = False
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,7 @@ class TaxProfile:
             interest_component_threshold=float(
                 (inc.get("interest_component") or {}).get("bond_share_threshold", 1.0)
             ),
+            interest_component_at_sale=bool((inc.get("interest_component") or {}).get("at_sale", False)),
         )
 
         cg = raw.get("capital_gains")

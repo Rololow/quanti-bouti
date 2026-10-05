@@ -297,3 +297,43 @@ def test_engine_trend_filter_scales_down_falling_assets():
     e2._apply_trend(requested, {}, ["SPY", "TLT"], np.array([[0.04, 0.0], [0.0, 0.01]]))
     # TLT seul à 0,5 : vol 5 % -> remis à la vol cible 12 %, soit 1,2 (sous le plafond brut 2).
     assert requested["SPY"] == 0.0 and requested["TLT"] == pytest.approx(0.5 * 0.12 / 0.05)
+
+
+# ------------------------------------------------------------------ étape 3 : tendance lente, CPPI
+
+def test_slow_trend_updates_weekly_and_ignores_small_changes():
+    from trading_engine.allocation.trend import TrendFilter
+
+    tf = TrendFilter((1, 2, 3, 4), update_every=5, min_change=0.5)
+    for p in (100, 101, 102, 103, 104):
+        tf.on_close("A", p)
+    assert tf.held_score("A") == 1.0
+    tf.on_close("A", 103.5)                                  # 1 horizon sur 4 bascule
+    assert tf.score("A") == 0.75 and tf.held_score("A") == 1.0   # pas encore une semaine
+    for p in (103.6, 103.7, 103.8, 103.75):                  # 5 clôtures : réévaluation
+        tf.on_close("A", p)
+    assert tf.score("A") == 0.75 and tf.held_score("A") == 1.0   # écart 0,25 < 0,5 : gardé
+    for p in (102, 101, 100, 99, 98):                        # tout en baisse : 0 appliqué
+        tf.on_close("A", p)
+    assert tf.held_score("A") == 0.0
+    fast = TrendFilter((1, 2, 3, 4))
+    for p in (100, 101, 102, 103, 104, 103.5):
+        fast.on_close("A", p)
+    assert fast.held_score("A") == 0.75                      # défaut : immédiat
+
+
+def test_cppi_multiplier_keeps_exposure_in_small_drawdowns():
+    cfg = load_config()
+    base = dataclasses.replace(cfg.allocation, drawdown_control=0.15)
+    gz = Engine(dataclasses.replace(cfg, allocation=base))
+    cppi = Engine(dataclasses.replace(cfg, allocation=dataclasses.replace(base, drawdown_multiplier=2.0)))
+    for e in (gz, cppi):
+        e.risk.portfolio_drawdown.update(100.0)
+        e.risk.portfolio_drawdown.update(95.0)               # -5 %
+    assert gz._drawdown_scale() == pytest.approx((1 - 0.85 / 0.95) / 0.15)
+    assert cppi._drawdown_scale() == pytest.approx(min(1.0, 2 * (1 - 0.85 / 0.95) / 0.15))
+    for e in (gz, cppi):
+        e.risk.portfolio_drawdown.update(85.0)
+    assert gz._drawdown_scale() == 0.0 and cppi._drawdown_scale() == 0.0
+    with pytest.raises(ValueError):
+        AllocationConfig(drawdown_multiplier=0.5)

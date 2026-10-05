@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not file:
                     parser.error(f"expected SYMBOLE=chemin.csv, got {item!r}")
                 files[sym.strip().upper()] = file
-        keep = None
+        keep = interest = None
         if args.net_dividends:
             from trading_engine.tax.profile import load_tax_profile
             from trading_engine.tax.tax_model import TaxModel
@@ -138,7 +138,11 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--net-dividends requires tax.profile in the config")
             model = TaxModel(load_tax_profile(resolve_path(cfg.tax.profile)), cfg.instruments)
             keep = {sym: model.distribution_keep(sym) for sym in files}
-        summary = import_daily_csv(files, out, start=args.start, end=args.end, keep=keep)
+            # Reynders à la revente : intérêts accumulés par part (base de la taxe).
+            interest = {sym: min(model.instrument(sym).bond_share, 1.0) * (1.0 - model.instrument(sym).fund_withholding)
+                        for sym in files if model.interest_tax_applies(sym)}
+        summary = import_daily_csv(files, out, start=args.start, end=args.end, keep=keep,
+                                   interest=interest if keep is not None else None)
         if not summary["bars"]:
             print(summary)
             return 1
