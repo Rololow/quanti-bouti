@@ -20,6 +20,7 @@ allocation:
   target_vol: 0.12
   drawdown_control: 0.15
   drawdown_window_days: 365
+  drawdown_multiplier: 1.0       # 2 = CPPI : pleine exposition dans les petites baisses
   # Filtre de tendance (désactivé ici ; variantes *_tendance du backtest).
   trend:
     enabled: false
@@ -27,6 +28,8 @@ allocation:
     horizons: [21, 63, 126, 252]
     floor: 0.0
     redistribute: false
+    update_every: 1              # 5 = score hebdomadaire (moins de TOB)
+    min_change: 0.0              # 0.5 = changer seulement si 2 horizons sur 4 basculent
   constraints:
     max_gross: 2.0
     max_weight: 0.80

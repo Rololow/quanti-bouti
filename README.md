@@ -135,7 +135,7 @@ sont réinvestis, d'après le profil fiscal et le véhicule de chaque instrument
 | Véhicule | Part gardée d'un dividende | TOB |
 |---|---|---|
 | ETF US distribuant (config par défaut) | 85 % (retenue US) × 70 % (précompte) = 59,5 % | 0,35 % |
-| UCITS irlandais capitalisant (`config/tax_ucits.yaml`) | actions 85 % (retenue au niveau du fonds), obligations 70 % (Reynders, compté chaque année) | 0,12 % |
+| UCITS irlandais capitalisant (`config/tax_ucits.yaml`) | actions 85 % (retenue au niveau du fonds), obligations 100 % (Reynders payée à la revente, voir plus bas) | 0,12 % |
 
 ```bash
 python -m trading_engine.backtest import-csv SPY=... --net-dividends --out data/backtest/daily_us.jsonl
@@ -176,10 +176,16 @@ risque retiré va en cash, ou est redonné aux actifs en tendance jusqu'à la vo
 cible (`redistribute: true`). Il retire le risque des marchés baissiers
 prolongés (2008 ; 2022 pour les obligations), ceux qui rendent le levier
 dangereux.
+`trend.update_every: 5` (score hebdomadaire) et `trend.min_change: 0.5`
+(changement seulement si 2 horizons sur 4 basculent, ou si tous sont
+d'accord) limitent les allers-retours et la TOB.
+`allocation.drawdown_multiplier: 2` (CPPI) garde la pleine exposition dans
+les petites baisses et réduit plus vite près de la limite (1 = Grossman-Zhou,
+qui réduit dès la première perte).
 
 Variantes du backtest : `lev15_ancien` (comportement précédent, pour mesurer
 l'apport des corrections), `lev15`, `lev30`, `*_tendance`,
-`*_tendance_redist`, `lev15_actions`, `lev30_actions` (50 % du risque en
+`*_tendance_redist`, `*_tendance_lente*` (tendance lente, CPPI m=2), `lev15_actions`, `lev30_actions` (50 % du risque en
 actions). Le walk-forward choisit chaque année le meilleur rendement des 3
 dernières années (`--wf-lookback`) resté dans la limite de perte. Le cash est
 rémunéré au T-bill (références comprises).
@@ -205,10 +211,32 @@ précédentes ; la ligne « walk-forward » est le seul résultat hors
 échantillon. Autres grilles : `--grid decision.risk_aversion=5,20 --grid
 decision.holding_period=60d,120d`.
 
+**Impôts différés, mêmes règles pour le moteur et les références** :
+
+- **Reynders à la revente** : l'import (`--net-dividends`) cumule, pour les
+  fonds obligataires capitalisants, les intérêts distribués par part
+  (méta `interest_index` du dataset). Chaque vente paie 30 % × part en
+  créances × intérêts accumulés pendant la détention des lots vendus (FIFO) ;
+  sans index, repli prudent sur la plus-value × part en créances. Payer à la
+  revente plutôt que chaque année laisse l'impôt composer ; la décision voit
+  la Reynders d'une vente et évite de faire tourner les fonds obligataires.
+- **Taxe de 10 % sur les plus-values** prélevée au changement d'année
+  (exonération de 10 000 €). `tax.as_if_current_rules: true`
+  (`config/backtest_daily.yaml`) l'applique à tout l'historique, sans
+  step-up, pour mesurer les règles d'aujourd'hui ; le report de
+  l'exonération non utilisée n'est alors pas compté (prudent).
+- **Récolte de l'exonération** (`tax.harvest_exemption`) : à partir du
+  10 décembre, vente et rachat immédiat des lignes en plus-value (hors
+  Reynders) jusqu'à l'exonération restante, si l'impôt évité vaut au moins
+  2 × le coût aller-retour (TOB, spread). En live : alerte seulement. À
+  faire valider : règles anti-abus de la nouvelle taxe.
+- **« CAGR EUR liquidé »** : rendement si tout était vendu à la fin (TOB,
+  Reynders, plus-values, coûts) — la vraie comparaison entre une stratégie
+  qui réalise ses gains et une autre qui les reporte.
+
 Limites : chemin intra-barre approximé ; pas de cotations historiques
-(spread par défaut) ; prix ajustés des dividendes mais précompte non déduit ;
-impôt sur les plus-values non déduit des séries ; références exécutées à la
-clôture avec fractions d'actions (hypothèse favorable aux références).
+(spread par défaut) ; références exécutées à la clôture avec fractions
+d'actions (hypothèse favorable aux références).
 
 ### Tester avec un compte Alpaca **paper**
 
@@ -2764,7 +2792,8 @@ Le moteur :
 
 - comptabilise la TOB et les lots fiscaux à chaque fill ;
 - estime **avant** de décider le coût fiscal de rejoindre la cible
-  (TOB + impôt marginal sur les plus-values), qui entrera dans
+  (TOB + impôt marginal sur les plus-values + Reynders des ventes de fonds
+  obligataires), qui entrera dans
   $U_{rebalance}$ (Decision Engine).
 
 ---

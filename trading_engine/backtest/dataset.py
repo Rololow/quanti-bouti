@@ -230,7 +230,8 @@ def write_synthetic_dataset(
 
 
 def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: date | None = None,
-                     end: date | None = None, keep: Mapping[str, float] | None = None) -> dict:
+                     end: date | None = None, keep: Mapping[str, float] | None = None,
+                     interest: Mapping[str, float] | None = None) -> dict:
     """CSV quotidiens (un par symbole) -> dataset de barres 1d sur les séances NYSE.
 
     Colonnes reconnues (casse ignorée) : Date, Open, High, Low, Close, Volume
@@ -243,6 +244,11 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
     distributions sont réinvesties **nettes** d'impôts (indice de rendement
     total : I_t = I_{t-1} × (C_t + keep × D_t) / C_{t-1}) au lieu de l'Adj Close
     qui les réinvestit brutes.
+
+    `interest` ({symbole: part imposable}) : fonds obligataires soumis à la
+    taxe Reynders à la revente ; leurs distributions × cette part s'accumulent
+    en intérêts par part de l'indice (méta `interest_index`), base de la taxe
+    calculée à chaque vente.
     """
     import csv
 
@@ -250,6 +256,7 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
     skipped: dict[str, int] = {}
     net_keep: dict[str, float | None] = {}
     div_totals: dict[str, float] = {}
+    interest_index: dict[str, list[list]] = {}
     for sym, file in sorted(files.items()):
         with open(file, encoding="utf-8-sig", newline="") as fh:
             reader = csv.DictReader(fh)
@@ -285,6 +292,11 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
                 skipped[sym] = skipped.get(sym, 0) + 1
                 continue
             if net:
+                if interest and sym in interest and div and index is not None:
+                    # distribution par part de l'indice (avant réinvestissement)
+                    cum = (interest_index[sym][-1][1] if interest_index.get(sym) else 0.0)
+                    cum += interest[sym] * div * index / prev_close
+                    interest_index.setdefault(sym, []).append([day.isoformat(), cum])
                 index = c if index is None else index * (c + keep[sym] * div) / prev_close
                 prev_close, adj = c, index
                 div_totals[sym] = div_totals.get(sym, 0.0) + div
@@ -300,8 +312,11 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
         for bar in bars:
             writer.write(bar)
     meta = {"dividends": "net" if keep is not None else "gross (Adj Close)", "keep": net_keep}
+    if interest_index:
+        meta["interest_index"] = interest_index
     meta_path(path).write_text(json.dumps(meta), encoding="utf-8")
-    return {"path": str(path), "bars": len(bars), "skipped": skipped, **meta, "dividend_totals": div_totals,
+    shown = {**meta, "interest_index": {s: len(v) for s, v in interest_index.items()}} if interest_index else meta
+    return {"path": str(path), "bars": len(bars), "skipped": skipped, **shown, "dividend_totals": div_totals,
             "per_symbol": {s: sum(1 for b in bars if b.symbol == s) for s in files},
             "start": bars[0].timestamp.date().isoformat() if bars else None,
             "end": bars[-1].timestamp.date().isoformat() if bars else None}

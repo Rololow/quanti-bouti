@@ -105,12 +105,16 @@ class TrendConfig:
     horizons: tuple[int, ...] = (21, 63, 126, 252)
     floor: float = 0.0
     redistribute: bool = False
+    update_every: int = 1          # clôtures entre deux mises à jour du score (5 = hebdo)
+    min_change: float = 0.0        # écart minimal de score pour changer (0.5 = 2 horizons sur 4)
 
     def __post_init__(self) -> None:
         if not self.horizons or any(int(h) < 1 for h in self.horizons):
             raise ValueError("allocation.trend.horizons must be >= 1")
         if not 0 <= self.floor <= 1:
             raise ValueError("allocation.trend.floor must be in [0, 1]")
+        if self.update_every < 1 or not 0 <= self.min_change <= 1:
+            raise ValueError("allocation.trend.update_every must be >= 1, min_change in [0, 1]")
 
 
 ALLOCATION_METHODS = ("static", "baseline", "risk_parity", "hrp", "signal", "class_parity")
@@ -136,6 +140,10 @@ class AllocationConfig:
     # Plus haut de référence du contrôle du drawdown : jours calendaires
     # glissants (ex. 365) ; None = plus haut historique (peut bloquer en cash).
     drawdown_window_days: int | None = None
+    # Multiplicateur du coussin (CPPI) : 1 = Grossman-Zhou (l'exposition baisse
+    # dès la première perte) ; 2 = pleine exposition jusqu'à la moitié de la
+    # limite environ, puis réduction plus rapide jusqu'à 0 à la limite.
+    drawdown_multiplier: float = 1.0
     trend: TrendConfig = field(default_factory=TrendConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     constraints: Constraints = field(default_factory=Constraints)
@@ -151,6 +159,8 @@ class AllocationConfig:
             raise ValueError("allocation.drawdown_control must be in (0, 1)")
         if not 0 <= self.drawdown_min_scale <= 1:
             raise ValueError("allocation.drawdown_min_scale must be in [0, 1]")
+        if self.drawdown_multiplier < 1:
+            raise ValueError("allocation.drawdown_multiplier must be >= 1")
         if self.drawdown_window_days is not None and self.drawdown_window_days < 1:
             raise ValueError("allocation.drawdown_window_days must be >= 1")
 
@@ -340,6 +350,17 @@ class TaxConfig:
     # Registre fiscal persistant (lots datés, plus-values, TOB). Écrit seulement
     # en execution.mode alpaca_paper (jamais en simulation ni en replay).
     ledger_path: str | None = None
+    # Backtest : règles d'aujourd'hui (taxe sur les plus-values) appliquées à
+    # tout l'historique, sans step-up, pour mesurer leur effet.
+    as_if_current_rules: bool = False
+    # Taxe annuelle sur les plus-values prélevée sur le cash au changement
+    # d'année (simulation) ; en live, comptée à part (à déclarer).
+    settle_gains_tax: bool = True
+    # Récolte de l'exonération annuelle (vente + rachat en décembre) : remonte
+    # la base fiscale de gains exonérés. Simulation : exécutée ; live : alerte.
+    harvest_exemption: bool = False
+    harvest_from: str = "12-10"                   # MM-JJ : première séance de récolte
+    harvest_min_benefit: float = 2.0              # impôt évité >= 2 × coût aller-retour
 
 
 @dataclass(frozen=True)

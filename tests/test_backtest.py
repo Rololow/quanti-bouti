@@ -373,10 +373,12 @@ def test_distribution_keep_by_vehicle():
     from trading_engine.tax.tax_model import TaxModel
     from trading_engine.config import resolve_path
     for overlays, expected in (((), {"SPY": 0.595, "TLT": 0.595, "GLD": 1.0}),
-                               ((PROJECT_ROOT / "config" / "tax_ucits.yaml",), {"SPY": 0.85, "TLT": 0.70, "GLD": 1.0})):
+                               ((PROJECT_ROOT / "config" / "tax_ucits.yaml",), {"SPY": 0.85, "TLT": 1.0, "GLD": 1.0})):
         cfg = load_config(DEFAULT_CONFIG_PATH, overlays)
         model = TaxModel(load_tax_profile(resolve_path(cfg.tax.profile)), cfg.instruments)
         assert {s: round(model.distribution_keep(s), 3) for s in expected} == expected
+    # UCITS obligataire : Reynders à la revente (pas chaque année).
+    assert model.interest_tax_applies("TLT") and not model.interest_tax_applies("SPY")
 
 
 def test_yahoo_dividends_are_parsed():

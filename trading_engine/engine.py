@@ -72,10 +72,11 @@ from trading_engine.execution.alpaca_trading import (
 from trading_engine.execution.paper_broker import PaperBroker
 from trading_engine.data.alpaca_history import AlpacaHistoricalClient
 from trading_engine.data.events import CalendarEvent, OrderUpdateEvent, PortfolioEvent
-from trading_engine.data.events import FxEvent, RatesEvent, TaxLedgerEvent
+from trading_engine.data.events import FxEvent, InterestIndexEvent, RatesEvent, TaxLedgerEvent
 from trading_engine.portfolio.financing import RateSeries, accrue
 from trading_engine.tax.fx import FxRates, fetch_ecb_rates
-from trading_engine.backtest.dataset import BarDatasetFeed, fx_path as dataset_fx_path, rates_path as dataset_rates_path
+from trading_engine.backtest.dataset import (BarDatasetFeed, fx_path as dataset_fx_path, meta_path as dataset_meta_path,
+                                             rates_path as dataset_rates_path)
 from trading_engine.data.calendar import NY, MarketCalendar
 from trading_engine.execution.volume import VolumeTracker
 from trading_engine.risk.portfolio_risk import RollingDrawdown, portfolio_vol
@@ -87,7 +88,7 @@ from trading_engine.storage.decision_log import DecisionLogWriter
 from trading_engine.storage.event_log import EventLogWriter
 from trading_engine.tax.profile import load_tax_profile
 from trading_engine.timeutils import parse_timeframe, utcnow
-from trading_engine.tax.tax_model import RebalanceTaxCost, TaxModel
+from trading_engine.tax.tax_model import as_if_current_rules, RebalanceTaxCost, TaxModel
 
 logger = logging.getLogger(__name__)
 
@@ -212,9 +213,16 @@ class Engine:
             if alloc.trend.timeframe not in config.bar_timeframes:
                 raise ValueError(f"allocation.trend.timeframe {alloc.trend.timeframe!r} "
                                  f"is not in bars.timeframes {config.bar_timeframes}")
-            self.trend = TrendFilter(alloc.trend.horizons, alloc.trend.floor)
+            self.trend = TrendFilter(alloc.trend.horizons, alloc.trend.floor,
+                                     update_every=alloc.trend.update_every, min_change=alloc.trend.min_change)
         self._accrued_until: date | None = None
         self.interest_earned = 0.0           # devise du portefeuille
+        self.gains_tax_paid = 0.0            # taxe annuelle sur les plus-values (devise du portefeuille)
+        self.interest_tax_paid = 0.0         # Reynders (devise du portefeuille)
+        self.harvested_gains = 0.0           # gains récoltés sous l'exonération (devise du profil)
+        self.harvest_cost = 0.0
+        self._tax_year: int | None = None
+        self._harvested_year: int | None = None
         self.financing_cost = 0.0
         self.fx: FxRates | None = None
         self._fx_attempt: datetime | None = None
@@ -262,11 +270,14 @@ class Engine:
         self.bus.subscribe(EventType.FX, self._on_fx)
         self.bus.subscribe(EventType.TAX_LEDGER, self._on_tax_ledger)
         self.bus.subscribe(EventType.RATES, self._on_rates)
+        self.bus.subscribe(EventType.INTEREST_INDEX, self._on_interest_index)
 
     def _build_tax_model(self) -> TaxModel | None:
         if not self.config.tax.profile:
             return None
         profile = load_tax_profile(resolve_path(self.config.tax.profile))
+        if self.config.tax.as_if_current_rules:
+            profile = as_if_current_rules(profile)
         fx = self.config.fx
         model = TaxModel(
             profile,
@@ -291,10 +302,11 @@ class Engine:
         self.portfolio.apply_fill(symbol, quantity, price)
         if self.tax is not None:
             charge, _ = self.tax.record_fill(symbol, quantity, price, timestamp)
+            self.interest_tax_paid += charge.interest_tax
             if tax_in_cash:
-                self.portfolio.cash -= charge.portfolio_amount or 0.0
-            else:
-                self.taxes_outside_broker += charge.amount      # devise du profil (à déclarer)
+                self.portfolio.cash -= (charge.portfolio_amount or 0.0) + charge.interest_tax
+            else:                                              # devise du profil (à déclarer)
+                self.taxes_outside_broker += charge.amount + self.tax.to_tax(charge.interest_tax, timestamp)
             self._save_ledger()
 
     def estimate_rebalance_tax(self) -> RebalanceTaxCost | None:
@@ -418,6 +430,8 @@ class Engine:
     async def _on_trade(self, event: TradeEvent) -> None:
         if self.rates is not None:
             self._accrue_financing(event.timestamp)
+        if self.tax is not None and self.tax.gains is not None:
+            self._settle_tax_year(event.timestamp)
         self.market_state.update(event)
         self.portfolio.update_price(event.symbol, event.price, event.timestamp)
         self.risk.on_price(event.symbol, event.price, event.timestamp)
@@ -513,6 +527,8 @@ class Engine:
                     self.execution_feedback.on_order_closed(wo.order, wo.filled, wo.average_price)
             if self.remote_broker is not None:
                 await self.remote_broker.cancel_all()
+        if status.can_decide:
+            self._maybe_harvest(self.features.now)
         decision = None
         if self.config.decision.enabled:
             decision = self.decide(status)
@@ -823,6 +839,8 @@ class Engine:
             await self._load_fx(now)
         if self.config.financing.enabled and self.remote_broker is None:
             self._load_rates(now)
+        if self.tax is not None and self.config.feed.provider == "dataset":
+            self._load_interest_index(now)
         await self._drain_injected()          # le registre a besoin des taux
         if self.tax is not None:
             self._load_ledger(now)
@@ -884,6 +902,75 @@ class Engine:
 
     def _on_rates(self, event: RatesEvent) -> None:
         self.rates = RateSeries.from_payload(event.payload)
+
+    # ------------------------------------------------------------------ impôts différés
+
+    def _load_interest_index(self, now: datetime) -> None:
+        """Intérêts accumulés par part des fonds obligataires (méta du dataset)."""
+        path = dataset_meta_path(resolve_path(self.config.feed.dataset_path or "dataset"))
+        if not path.exists():
+            return
+        index = json.loads(path.read_text(encoding="utf-8")).get("interest_index")
+        if index:
+            self._injected.append(InterestIndexEvent(timestamp=now, received_at=now, symbol=None,
+                                                     source="dataset", payload=index))
+
+    def _on_interest_index(self, event: InterestIndexEvent) -> None:
+        if self.tax is not None:
+            self.tax.set_interest_index(event.payload)
+
+    def _settle_tax_year(self, ts: datetime) -> None:
+        """Changement d'année : taxe sur les plus-values de l'année écoulée,
+        prélevée sur le cash en simulation, comptée à part en live."""
+        year = ts.astimezone(NY).year
+        if self._tax_year is None:
+            self._tax_year = year
+            return
+        while self._tax_year < year:
+            due = self.tax.gains_tax_due(self._tax_year)
+            if due > 0 and self.config.tax.settle_gains_tax:
+                self.tax.gains_taxes_paid += due
+                if self.remote_broker is None:
+                    amount = self.tax.to_portfolio(due, ts)
+                    self.portfolio.cash -= amount
+                    self.gains_tax_paid += amount
+                else:
+                    self.taxes_outside_broker += due
+            self._tax_year += 1
+
+    def _maybe_harvest(self, now: datetime | None) -> None:
+        """Décembre : vend et rachète les lignes en plus-value jusqu'à
+        l'exonération restante de l'année (base fiscale remontée sans impôt)."""
+        tc = self.config.tax
+        if not tc.harvest_exemption or now is None or self.tax is None or self.tax.gains is None:
+            return
+        day = now.astimezone(NY).date()
+        month, dom = (int(x) for x in tc.harvest_from.split("-"))
+        if (day.month, day.day) < (month, dom) or self._harvested_year == day.year or self.market_block:
+            return
+        self._harvested_year = day.year
+        p = self.portfolio
+        positions = {s: (pos.quantity, p.prices.get(s, pos.avg_price)) for s, pos in p.positions.items()}
+        cost = self.config.execution.cost
+        exec_rate = (cost.default_spread_bps / 2 + cost.slippage_bps) * 1e-4
+        plan = self.tax.harvest_plan(positions, day, extra_cost_rate=exec_rate,
+                                     min_benefit=tc.harvest_min_benefit)
+        if not plan:
+            return
+        if self.remote_broker is not None or self.broker is None:
+            detail = ", ".join(f"{s} {q:.4g}" for s, q, _ in plan)
+            self.alerts.append(Alert("TAX_HARVEST", None, now,
+                                     f"récolte de l'exonération possible (vendre puis racheter) : {detail}", "info"))
+            return
+        for sym, qty, gain in plan:
+            price = positions[sym][1]
+            before = p.cash
+            self.record_fill(sym, -qty, price, now)
+            self.record_fill(sym, qty, price, now)
+            exec_cost = 2 * qty * price * exec_rate
+            p.cash -= exec_cost
+            self.harvest_cost += before - p.cash
+            self.harvested_gains += gain
 
     def _accrue_financing(self, ts: datetime) -> None:
         """Intérêts du cash (et du levier) jusqu'au jour de `ts` (New York)."""
@@ -1116,7 +1203,8 @@ class Engine:
 
     def _drawdown_scale(self) -> float:
         """Grossman-Zhou : plancher = (1 - D) × plus haut ; exposition ∝ marge
-        au-dessus du plancher, normalisée à 1 au plus haut, 0 au plancher."""
+        au-dessus du plancher, normalisée à 1 au plus haut, 0 au plancher.
+        `drawdown_multiplier` m > 1 (CPPI) : m × cette marge, plafonné à 1."""
         limit = self.config.allocation.drawdown_control
         if not limit:
             return 1.0
@@ -1125,7 +1213,7 @@ class Engine:
         if dd >= limit:
             scale = 0.0
         else:
-            scale = (1.0 - (1.0 - limit) / (1.0 - dd)) / limit
+            scale = self.config.allocation.drawdown_multiplier * (1.0 - (1.0 - limit) / (1.0 - dd)) / limit
         return max(self.config.allocation.drawdown_min_scale, min(1.0, scale))
 
     def _apply_trend(self, requested: dict[str, float], attribution: dict, symbols: list[str],

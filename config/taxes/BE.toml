@@ -100,6 +100,9 @@ default = 0.30               # hypothèse prudente si le pays n'est pas listé
 [income_tax.interest_component]
 rate = 0.30
 bond_share_threshold = 0.10
+# Due à la revente (ou au rachat), sur la composante intérêts accumulée
+# pendant la détention (TIS par part) : pas chaque année.
+at_sale = true
 
 # ---------------------------------------------------------------------------
 # Contribution de solidarité sur les plus-values des actifs financiers.

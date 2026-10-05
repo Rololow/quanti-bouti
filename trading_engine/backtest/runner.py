@@ -46,9 +46,16 @@ from trading_engine.data.events import EventType
 from trading_engine.safety.safety_engine import SafetyState
 from trading_engine.tax.fx import FxRates
 from trading_engine.tax.profile import load_tax_profile
-from trading_engine.tax.tax_model import TaxModel
+from trading_engine.tax.tax_model import TaxModel, as_if_current_rules
 
 logger = logging.getLogger(__name__)
+
+_LEV15 = {"allocation.method": "class_parity", "decision.include_alpha": False,
+          "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15}
+_LEV30 = {"allocation.method": "class_parity", "decision.include_alpha": False,
+          "allocation.drawdown_control": 0.30, "risk.limits.max_drawdown": 0.30}
+_TREND = {"allocation.trend.enabled": True}
+_SLOW = {"allocation.trend.update_every": 5, "allocation.trend.min_change": 0.5}
 
 # Variantes du moteur comparées (paramètres communs à toutes leurs exécutions).
 VARIANTS: dict[str, dict[str, Any]] = {
@@ -88,6 +95,19 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "lev30_tendance_redist": {"allocation.method": "class_parity", "decision.include_alpha": False,
                               "allocation.drawdown_control": 0.30, "risk.limits.max_drawdown": 0.30,
                               "allocation.trend.enabled": True, "allocation.trend.redistribute": True},
+    # Étape 3 : tendance lente (score hebdomadaire, changement d'au moins 2
+    # horizons sur 4) contre la TOB ; contrôle du drawdown CPPI m = 2 (pleine
+    # exposition dans les petites baisses) pour utiliser le risque prévu.
+    "lev15_tendance_lente": {**_LEV15, **_TREND, **_SLOW},
+    "lev15_tendance_lente_m2": {**_LEV15, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0},
+    "lev15_tendance_lente_redist_m2": {**_LEV15, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0,
+                                       "allocation.trend.redistribute": True},
+    "lev30_tendance_lente_m2": {**_LEV30, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0},
+    # Récolte de l'exonération de 10 000 EUR (vente + rachat en décembre).
+    "lev15_tendance_lente_m2_recolte": {**_LEV15, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0,
+                                        "tax.harvest_exemption": True},
+    "lev30_tendance_lente_redist_m2": {**_LEV30, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0,
+                                       "allocation.trend.redistribute": True},
     "lev15_actions": {"allocation.method": "class_parity", "decision.include_alpha": False,
                       "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15,
                       "allocation.class_budgets": {"equity": 0.5, "bonds": 0.25, "commodities": 0.25}},
@@ -109,6 +129,12 @@ VARIANT_LABELS = {
     "lev15_tendance_redist": "Levier -15 % + tendance, risque redistribué",
     "lev30_tendance": "Levier -30 % + filtre de tendance (vers cash)",
     "lev30_tendance_redist": "Levier -30 % + tendance, risque redistribué",
+    "lev15_tendance_lente": "Levier -15 % + tendance lente (vers cash)",
+    "lev15_tendance_lente_m2": "Levier -15 % + tendance lente, drawdown CPPI m=2",
+    "lev15_tendance_lente_redist_m2": "Levier -15 % + tendance lente redistribuée, CPPI m=2",
+    "lev30_tendance_lente_m2": "Levier -30 % + tendance lente, drawdown CPPI m=2",
+    "lev30_tendance_lente_redist_m2": "Levier -30 % + tendance lente redistribuée, CPPI m=2",
+    "lev15_tendance_lente_m2_recolte": "Levier -15 % + tendance lente, CPPI m=2, récolte de l'exonération",
 }
 # Références à poids fixes, rebalancées chaque mois (calculées si leurs symboles
 # sont dans le dataset).
@@ -235,9 +261,27 @@ def run_engine(cfg: Config, name: str, params: Mapping[str, Any], *,
             "max_gross": max(gross, default=0.0),
             "financing_cost": engine.financing_cost,
             "interest_earned": engine.interest_earned,
+            "gains_tax_paid": engine.gains_tax_paid,
+            "interest_tax_paid": engine.interest_tax_paid,
+            "harvested_gains": engine.harvested_gains,
+            "liquidation_cost": _engine_liquidation(engine),
             "final_safety": engine.safety.state.value,
         },
     )
+
+
+def _engine_liquidation(engine) -> float | None:
+    """Coût de tout vendre à la fin : impôts (taxe sur transaction, Reynders,
+    plus-values) + spread et slippage, devise du portefeuille."""
+    if engine.tax is None or engine.features.now is None:
+        return None
+    p = engine.portfolio
+    positions = {s: (pos.quantity, p.prices.get(s, pos.avg_price)) for s, pos in p.positions.items()
+                 if pos.quantity > 0}
+    cost = engine.config.execution.cost
+    exec_rate = (cost.default_spread_bps / 2 + cost.slippage_bps) * 1e-4
+    return (engine.tax.liquidation_cost(positions, engine.features.now)
+            + sum(q * px for q, px in positions.values()) * exec_rate)
 
 
 def _run_job(job: dict) -> StrategyResult:
@@ -323,6 +367,36 @@ def _tax_fn(cfg: Config, fx: FxRates | None):
     return tax
 
 
+def _tax_model(cfg: Config, fx: FxRates | None, dataset: Path) -> TaxModel | None:
+    """Modèle fiscal neuf (une stratégie de référence = un registre de lots)."""
+    if not cfg.tax.profile:
+        return None
+    profile = load_tax_profile(resolve_path(cfg.tax.profile))
+    if cfg.tax.as_if_current_rules:
+        profile = as_if_current_rules(profile)
+    model = TaxModel(profile, cfg.instruments,
+                     portfolio_currency=cfg.fx.portfolio_currency if fx is not None else None)
+    if fx is not None:
+        model.set_fx(fx)
+    meta = meta_path(dataset)
+    if meta.exists():
+        index = json.loads(meta.read_text(encoding="utf-8")).get("interest_index")
+        if index:
+            model.set_interest_index(index)
+    return model
+
+
+def _benchmark_tax_kw(cfg: Config, fx: FxRates | None, dataset: Path) -> dict:
+    model = _tax_model(cfg, fx, dataset)
+    if model is None:
+        return {}
+    harvest = None
+    if cfg.tax.harvest_exemption:
+        harvest = {"from": tuple(int(x) for x in cfg.tax.harvest_from.split("-")),
+                   "min_benefit": cfg.tax.harvest_min_benefit}
+    return {"tax_model": model, "harvest": harvest}
+
+
 def load_fx(cfg: Config, dataset: Path) -> FxRates | None:
     path = fx_path(dataset)
     if cfg.fx.provider == "off":
@@ -337,6 +411,11 @@ def row(result: StrategyResult, eval_start: date, eval_end: date, fx: FxRates | 
     m = metrics.compute(result.equity, start=eval_start, end=eval_end, fx=fx)
     m["turnover"] = metrics.turnover(result.trades, result.equity, eval_start, eval_end)
     m["transaction_tax"] = sum(a for d, a in result.taxes if eval_start <= d <= eval_end)
+    liq = (result.stats or {}).get("liquidation_cost")
+    window = metrics.window(result.equity, eval_start, eval_end)
+    if liq is not None and window and fx is not None and len(fx):
+        adjusted = window[:-1] + [(window[-1][0], window[-1][1] - liq)]
+        m["cagr_eur_net"] = metrics.compute(adjusted, fx=fx).get(f"cagr_{fx.base.lower()}")
     return {"name": result.name, "kind": result.kind, "params": result.params, "metrics": m,
             "stats": result.stats}
 
@@ -405,14 +484,15 @@ def run_backtest(
     cash = cfg.portfolio.cash
     min_cash = cfg.allocation.constraints.min_cash
     benchmarks = [
-        buy_and_hold(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash, cash_rate=cash_rate),
+        buy_and_hold(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash, cash_rate=cash_rate,
+                     **_benchmark_tax_kw(cfg, fx, dataset)),
         monthly_inverse_vol(days, prices, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash,
-                            cash_rate=cash_rate),
+                            cash_rate=cash_rate, **_benchmark_tax_kw(cfg, fx, dataset)),
     ]
 
     for name, weights in FIXED_BENCHMARKS:
         b = monthly_fixed(name, days, prices, weights, cash=cash, cost_bps=cost_bps, tax=tax, min_cash=min_cash,
-                          cash_rate=cash_rate)
+                          cash_rate=cash_rate, **_benchmark_tax_kw(cfg, fx, dataset))
         if b is not None:
             benchmarks.append(b)
 
@@ -428,6 +508,11 @@ def run_backtest(
             wf, folds = walk_forward(runs, eval_start, eval_end, runs[default_index], max_drawdown=limit,
                                      lookback_years=wf_lookback_years)
             wf.name = f"{VARIANT_LABELS[v]} — walk-forward (hors échantillon)"
+            # Liquidation : même part de la valeur finale que le run choisi en dernier.
+            last = next((x for x in runs if x.name == folds[-1]["chosen"]), None) if folds else None
+            liq = (last.stats or {}).get("liquidation_cost") if last is not None else None
+            if liq is not None and last.equity and last.equity[-1][1] > 0 and wf.equity:
+                wf.stats = {"liquidation_cost": liq / last.equity[-1][1] * wf.equity[-1][1]}
             r = row(wf, eval_start, eval_end, fx)
             r["metrics"]["turnover"] = None             # dépend des runs choisis, cf. folds
             r["metrics"]["transaction_tax"] = None      # déjà dans chaque série recollée
@@ -478,6 +563,12 @@ def caveats(cfg: Config, fx: FxRates | None, dividends: dict | None) -> list[str
         keep = ", ".join(f"{s} {k:.0%}" for s, k in sorted((dividends.get("keep") or {}).items()) if k is not None)
         out[2] = (f"Dividendes réinvestis NETS d'impôts sur les revenus (part gardée : {keep}) ; "
                   "exonération annuelle des petits dividendes ignorée.")
+    if cfg.tax.as_if_current_rules:
+        out.insert(0, "Règles fiscales actuelles appliquées à tout l'historique (taxe de 10 % sur les plus-values "
+                      "comme si elle existait depuis le début, sans step-up) : mesure des règles, pas du passé réel.")
+    if cfg.tax.harvest_exemption:
+        out.insert(0, f"Récolte de l'exonération chaque année à partir du {cfg.tax.harvest_from} (moteur et "
+                      "références) : vente et rachat immédiat — vérifier qu'aucune règle anti-abus ne s'y oppose.")
     if fx is not None and fx.source == "fixed":
         out.insert(0, f"Taux BCE indisponibles : EUR/USD fixe {cfg.fx.fixed_rate} — les colonnes EUR et la TOB "
                       "ne reflètent pas le vrai change.")
@@ -552,7 +643,10 @@ CAVEATS = [
     "Prix ajustés des dividendes (Alpaca adjustment=all ou Adj Close Yahoo) : dividendes réinvestis "
     "implicitement, précompte et retenue US non déduits.",
     "Point de vue EUR : le cash est en USD ; un portefeuille resté en cash subit tout le change EUR/USD.",
-    "Impôt sur les plus-values non déduit des séries (estimé séparément par le moteur) ; TOB déduite.",
+    "Impôts déduits des séries (moteur et références, mêmes règles) : TOB, Reynders à chaque vente de "
+    "fonds obligataire (intérêts accumulés par part), taxe sur les plus-values au changement d'année. "
+    "« CAGR EUR liquidé » : valeur finale après avoir tout vendu (impôts et coûts de sortie) ; pour le "
+    "walk-forward, même part que le dernier run choisi.",
     "Références exécutées à la clôture avec fractions d'actions : hypothèse favorable aux références.",
     "Sharpe/Sortino avec taux sans risque nul.",
     "Walk-forward : un run continu par paramètre (le moteur n'est pas redémarré à chaque année).",
@@ -576,20 +670,24 @@ def _row_line(r: dict) -> str:
         halts += " " + ", ".join(f"{k}×{n}" for k, n in sorted(s["halt_reasons"].items()))
     expo = "–" if not s or "avg_gross" not in s else f"{s['avg_gross']:.2f} / {s['max_gross']:.2f}"
     fin = "–" if not s or "financing_cost" not in s else f"-{s['financing_cost']:,.0f} / +{s['interest_earned']:,.0f}"
+    taxes = ("–" if not s or "gains_tax_paid" not in s
+             else f"{s['gains_tax_paid']:,.0f} / {s['interest_tax_paid']:,.0f}")
     ci = (r.get("sharpe_ci") or {})
     sharpe = _num(m.get("sharpe"))
     if ci.get("low") is not None:
         sharpe += f" [{_num(ci['low'])} ; {_num(ci['high'])}]"
     return (f"| {r['name']} | {_pct(m.get('cagr'))} | {_pct(m.get('vol'))} | {sharpe} | "
-            f"{_pct(m.get('max_drawdown'))} | {_pct(m.get('cagr_eur'))} | {_pct(m.get('max_drawdown_eur'))} | "
-            f"{_num(m.get('turnover'))} | {_num(m.get('transaction_tax'), 0)} | {expo} | {fin} | {halts} |")
+            f"{_pct(m.get('max_drawdown'))} | {_pct(m.get('cagr_eur'))} | {_pct(m.get('cagr_eur_net'))} | "
+            f"{_pct(m.get('max_drawdown_eur'))} | {_num(m.get('turnover'))} | {_num(m.get('transaction_tax'), 0)} | "
+            f"{taxes} | {expo} | {fin} | {halts} |")
 
 
 def format_report(report: dict) -> str:
     ccy, tccy = report["currency"], report.get("tax_currency") or ""
-    header = (f"| Stratégie | CAGR {ccy} | Vol | Sharpe [IC 90 %] | Max DD | CAGR EUR | Max DD EUR | "
-              f"Turnover/an | TOB {tccy} | Expo. brute moy./max | Financement {ccy} | Arrêts |\n"
-              "|---|---|---|---|---|---|---|---|---|---|---|---|")
+    header = (f"| Stratégie | CAGR {ccy} | Vol | Sharpe [IC 90 %] | Max DD | CAGR EUR | CAGR EUR liquidé | "
+              f"Max DD EUR | Turnover/an | TOB {tccy} | Impôt PV / Reynders {ccy} | Expo. brute moy./max | "
+              f"Financement {ccy} | Arrêts |\n"
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     prov = report.get("provenance") or {}
     lines = [
         f"Backtest {report['symbols']} — données {report['bars_start']} → {report['bars_end']}, "

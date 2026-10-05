@@ -36,6 +36,7 @@ class EventType(str, Enum):
     FX = "fx"
     TAX_LEDGER = "tax_ledger"
     RATES = "rates"
+    INTEREST_INDEX = "interest_index"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -166,6 +167,14 @@ class RatesEvent(Event):
     """Taux courts pour le financement (payload : `RateSeries.to_payload()`)."""
 
     event_type = EventType.RATES
+
+
+@dataclass(frozen=True, kw_only=True)
+class InterestIndexEvent(Event):
+    """Intérêts accumulés par part des fonds obligataires (base Reynders) :
+    payload `{symbole: [[jour, cumul], ...]}`."""
+
+    event_type = EventType.INTEREST_INDEX
 
 
 @dataclass(frozen=True, kw_only=True)

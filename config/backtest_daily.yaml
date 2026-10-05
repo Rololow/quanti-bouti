@@ -72,3 +72,9 @@ alerts:
 portfolio:
   cash: 100000.0
   positions: {}
+
+tax:
+  # Règles d'aujourd'hui sur tout l'historique : taxe de 10 % sur les
+  # plus-values comme si elle existait depuis le début (sinon elle ne
+  # jouerait qu'en 2026 et le backtest ne la verrait pas).
+  as_if_current_rules: true
