@@ -164,3 +164,136 @@ def test_walk_forward_maximizes_return_under_drawdown_limit():
     assert dd_folds[1]["chosen"] == "safe" and "≥ -15%" in dd_folds[1]["reason"]
     _, loose = walk_forward([safe, risky], days[0], days[-1], default=safe, max_drawdown=0.50)
     assert loose[1]["chosen"] == "risky"
+
+
+# ------------------------------------------------------------------ étape 1 : levier sans blocage
+
+def test_rolling_drawdown_forgets_old_peak():
+    from trading_engine.risk.portfolio_risk import RollingDrawdown
+
+    dd = RollingDrawdown(365)
+    d0 = date(2020, 1, 1)
+    dd.update(100.0, d0)
+    dd.update(90.0, d0 + timedelta(days=10))
+    assert dd.drawdown == pytest.approx(-0.10) and dd.peak == 100.0
+    dd.update(88.0, d0 + timedelta(days=364))
+    assert dd.drawdown == pytest.approx(88 / 100 - 1)
+    dd.update(88.0, d0 + timedelta(days=366))                # le plus haut de 100 a expiré
+    assert dd.peak == 90.0 and dd.drawdown == pytest.approx(88 / 90 - 1)
+    dd.update(95.0, d0 + timedelta(days=366))                # même jour : plus haut du jour
+    assert dd.peak == 95.0 and dd.drawdown == 0.0
+    with pytest.raises(ValueError):
+        RollingDrawdown(0)
+
+
+def test_drawdown_control_uses_rolling_peak_when_configured():
+    cfg = load_config("config/config.yaml", (LEVERAGE,))
+    e = Engine(cfg)
+    assert e.rolling_drawdown is not None and e.rolling_drawdown.window_days == 365
+    d0 = date(2020, 1, 1)
+    e.risk.portfolio_drawdown.update(100.0)
+    e.risk.portfolio_drawdown.update(80.0)                   # -20 % du plus haut historique
+    e.rolling_drawdown.update(100.0, d0)
+    e.rolling_drawdown.update(80.0, d0 + timedelta(days=400))
+    assert e._drawdown_scale() == 1.0                        # nouveau plus haut glissant : réexposé
+
+
+def test_decision_forces_deleveraging_above_gross_cap():
+    from trading_engine.decision.rebalance import UREBALANCE, DecisionConfig, DecisionContext, DecisionEngine
+
+    cov = np.array([[0.04, 0.0], [0.0, 0.01]])
+    base = dict(timestamp=datetime(2026, 3, 2, 15, tzinfo=UTC), portfolio_value=100_000.0,
+                current={"A": 1.25, "B": 1.10}, target={"A": 1.0, "B": 1.0}, symbols=["A", "B"], cov=cov,
+                prices={"A": 100.0, "B": 50.0}, spreads={"A": 0.0, "B": 0.0})
+    # Coûts énormes et bande large : sans plafond, rien ne bouge.
+    engine = DecisionEngine(DecisionConfig(default_spread_bps=500.0, no_trade_band=0.5, holding_period="5d"))
+    assert engine.decide(DecisionContext(**base)).action != UREBALANCE
+    d = engine.decide(DecisionContext(**base, max_gross=2.0))
+    assert d.action == UREBALANCE and d.fraction == 1.0
+    assert d.execution_weights == pytest.approx({"A": 1.0, "B": 1.0})
+    assert "désendettement" in d.reasons[0]
+    # Dans la tolérance : décision économique habituelle.
+    near = dict(base, current={"A": 1.02, "B": 1.01})
+    assert engine.decide(DecisionContext(**near, max_gross=2.0)).action != UREBALANCE
+
+
+def test_leverage_overlay_does_not_halt_on_losses():
+    cfg = load_config("config/config.yaml", (LEVERAGE,))
+    assert cfg.safety.halt_on_breaches == ()
+    assert cfg.safety.invariant_gross_tolerance >= 0.2 and cfg.decision.delever_tolerance == 0.05
+
+
+def test_walk_forward_lookback_unlocks_after_old_breach():
+    days = [date(2020, 1, 1) + timedelta(days=i) for i in range(6 * 365)]
+
+    def path(daily, crash_day, crash):
+        v, out = 100.0, []
+        for i, d in enumerate(days):
+            v *= 1 + daily - (crash if i == crash_day else 0.0)
+            out.append((d, v))
+        return out
+
+    safe = StrategyResult("safe", path(0.0001, 10, 0.0), params={"p": "safe"})
+    risky = StrategyResult("risky", path(0.0008, 100, 0.25), params={"p": "risky"})   # -25 % la 1re année
+    _, locked = walk_forward([safe, risky], days[0], days[-1], default=safe, max_drawdown=0.15)
+    _, recent = walk_forward([safe, risky], days[0], days[-1], default=safe, max_drawdown=0.15, lookback_years=2)
+    assert [f["chosen"] for f in locked][-1] == "safe"
+    assert [f["chosen"] for f in recent][-1] == "risky"
+
+
+def test_variant_params_accept_none_and_tuples():
+    from trading_engine.backtest.runner import VARIANTS, with_params
+
+    cfg = with_params(load_config("config/config.yaml", (LEVERAGE,)), VARIANTS["lev15_ancien"])
+    assert cfg.allocation.drawdown_window_days is None
+    assert cfg.safety.halt_on_breaches == ("DRAWDOWN", "LEVERAGE")
+    cfg = with_params(cfg, {"safety.halt_on_breaches": "DRAWDOWN+LEVERAGE"})
+    assert cfg.safety.halt_on_breaches == ("DRAWDOWN", "LEVERAGE")
+
+
+# ------------------------------------------------------------------ étape 2 : filtre de tendance
+
+def test_trend_filter_scores_horizons():
+    from trading_engine.allocation.trend import TrendFilter
+
+    tf = TrendFilter((2, 4), floor=0.25)
+    for p in (100, 101, 102, 103, 104):
+        tf.on_close("UP", p)
+    for p in (100, 99, 98, 97, 96):
+        tf.on_close("DOWN", p)
+    for p in (100, 110, 120, 100, 105):                      # +5 % sur 2, +5 % sur 4... puis
+        tf.on_close("MIX", p)
+    tf.on_close("SHORT", 100)
+    assert tf.score("UP") == 1.0 and tf.score("DOWN") == 0.0 and tf.score("SHORT") is None
+    assert tf.score("MIX") == 0.5                             # 120 -> 105 en baisse, 100 -> 105 en hausse
+    assert tf.score("UP", cash_rate=252 * 0.01) == 0.0         # hausse < rendement du cash
+    m = tf.multipliers(["UP", "DOWN", "SHORT"])
+    assert m == {"UP": 1.0, "DOWN": 0.25, "SHORT": 1.0}
+    with pytest.raises(ValueError):
+        TrendFilter((0,))
+
+
+def test_engine_trend_filter_scales_down_falling_assets():
+    cfg = load_config("config/config.yaml", (LEVERAGE,))
+    with pytest.raises(ValueError, match="trend.timeframe"):
+        Engine(dataclasses.replace(cfg, allocation=dataclasses.replace(
+            cfg.allocation, trend=dataclasses.replace(cfg.allocation.trend, enabled=True, timeframe="1w"))))
+    cfg = dataclasses.replace(cfg, allocation=dataclasses.replace(
+        cfg.allocation, trend=dataclasses.replace(cfg.allocation.trend, enabled=True, horizons=(2, 4))))
+    tf = cfg.allocation.trend.timeframe
+    assert tf in cfg.bar_timeframes
+    e = Engine(cfg)
+    for p in (100, 99, 98, 97, 96):
+        e.trend.on_close("SPY", p)
+        e.trend.on_close("TLT", 200 - p)
+    requested, attribution = {"SPY": 0.5, "TLT": 0.5}, {}
+    e._apply_trend(requested, attribution, ["SPY", "TLT"], None)
+    assert requested == {"SPY": 0.0, "TLT": 0.5} and attribution["SPY"]["trend"] == -0.5
+    redist = dataclasses.replace(cfg, allocation=dataclasses.replace(
+        cfg.allocation, trend=dataclasses.replace(cfg.allocation.trend, redistribute=True)))
+    e2 = Engine(redist)
+    e2.trend = e.trend
+    requested = {"SPY": 0.5, "TLT": 0.5}
+    e2._apply_trend(requested, {}, ["SPY", "TLT"], np.array([[0.04, 0.0], [0.0, 0.01]]))
+    # TLT seul à 0,5 : vol 5 % -> remis à la vol cible 12 %, soit 1,2 (sous le plafond brut 2).
+    assert requested["SPY"] == 0.0 and requested["TLT"] == pytest.approx(0.5 * 0.12 / 0.05)

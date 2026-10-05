@@ -162,14 +162,27 @@ données) + 0,5 % — approximation d'un levier par futures ; un prêt sur marge
 coûte plus cher (`financing.borrow_spread`). `allocation.class_budgets`
 répartit le risque entre classes (ex. `{equity: 0.5, bonds: 0.25,
 commodities: 0.25}`). `allocation.drawdown_control` (ex. 0.15) réduit
-l'exposition à mesure que la perte depuis le plus haut approche la limite
-(Grossman-Zhou : exposition ∝ marge au-dessus du plancher), et le Safety
-Engine arrête tout à la limite (`risk.limits.max_drawdown`). Les variantes
-`lev15`, `lev30`, `lev15_actions`, `lev30_actions` du backtest comparent
-limites -15 % / -30 % et budgets égaux / 50 % actions sur plusieurs cibles de
-volatilité ; le walk-forward choisit chaque année le meilleur rendement passé
-resté dans la limite de perte. Le cash est rémunéré au T-bill (références
-comprises).
+l'exposition à mesure que la perte depuis le plus haut des 12 derniers mois
+(`allocation.drawdown_window_days: 365`) approche la limite (Grossman-Zhou :
+exposition ∝ marge au-dessus du plancher). Avec levier, la réponse aux pertes
+est la réduction d'exposition, pas l'arrêt : pas de HALTED sur drawdown ni
+sur levier (un arrêt figerait les positions levées au pire moment), et si les
+prix font dériver l'exposition au-delà du plafond + `decision.delever_tolerance`,
+la décision désendette vers la cible sans calcul coût/bénéfice.
+
+**Filtre de tendance** (`allocation.trend`) : chaque poids est multiplié par
+la part des horizons (1, 3, 6, 12 mois) où l'actif a battu le cash ; le
+risque retiré va en cash, ou est redonné aux actifs en tendance jusqu'à la vol
+cible (`redistribute: true`). Il retire le risque des marchés baissiers
+prolongés (2008 ; 2022 pour les obligations), ceux qui rendent le levier
+dangereux.
+
+Variantes du backtest : `lev15_ancien` (comportement précédent, pour mesurer
+l'apport des corrections), `lev15`, `lev30`, `*_tendance`,
+`*_tendance_redist`, `lev15_actions`, `lev30_actions` (50 % du risque en
+actions). Le walk-forward choisit chaque année le meilleur rendement des 3
+dernières années (`--wf-lookback`) resté dans la limite de perte. Le cash est
+rémunéré au T-bill (références comprises).
 
 **Config par défaut : risk parity sans alpha** (`allocation.method:
 risk_parity`, `decision.include_alpha: false`). Sur 2006-2026, le moteur avec

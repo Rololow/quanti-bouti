@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from collections import deque
+from datetime import date, datetime
 
 import numpy as np
 
@@ -81,4 +82,39 @@ class DrawdownTracker:
             self.peak_time = timestamp
         self.drawdown = value / self.peak - 1.0
         self.max_drawdown = min(self.max_drawdown, self.drawdown)
+        return self.drawdown
+
+
+class RollingDrawdown:
+    """Drawdown par rapport au plus haut des `window_days` derniers jours
+    calendaires (plus haut de chaque jour gardé).
+
+    Le contrôle du drawdown sur le plus haut historique enferme le portefeuille
+    en cash après une perte proche de la limite : l'exposition ne revient qu'avec
+    un nouveau record, que le cash ne peut pas produire. Un plus haut glissant
+    oublie l'ancien sommet et laisse l'exposition se reconstruire."""
+
+    def __init__(self, window_days: int) -> None:
+        if window_days < 1:
+            raise ValueError(f"window_days must be >= 1, got {window_days}")
+        self.window_days = window_days
+        self._days: deque[tuple[date, float]] = deque()
+        self.peak: float | None = None
+        self.drawdown = 0.0
+
+    def update(self, value: float, day: date) -> float:
+        if value <= 0:
+            return self.drawdown
+        if self._days and self._days[-1][0] == day:
+            if value > self._days[-1][1]:
+                self._days[-1] = (day, value)
+        else:
+            self._days.append((day, value))
+        expired = False
+        while (day - self._days[0][0]).days >= self.window_days:
+            self._days.popleft()
+            expired = True
+        if expired or self.peak is None or value > self.peak:
+            self.peak = max(v for _, v in self._days)
+        self.drawdown = value / self.peak - 1.0
         return self.drawdown
