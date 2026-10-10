@@ -20,13 +20,13 @@ on:
         default: "allocation.target_vol=0.08,0.12,0.16"
       variants:
         description: "Variantes du moteur"
-        default: "lev15_tendance,lev15_tendance_lente,lev15_tendance_lente_m2,lev15_tendance_lente_m2_recolte,lev15_tendance_lente_redist_m2,lev30_tendance_lente_m2,lev30_tendance_lente_redist_m2"
+        default: "lev15_tendance_lente_m2,lev15_tendance_lente_m2_recolte,lev30_tendance_lente_m2_recolte"
       overlays:
         description: "Surcouches supplémentaires (séparées par des espaces)"
         default: "config/leverage.yaml"
       scenarios:
-        description: "Scénarios fiscaux : ucits, us"
-        default: "ucits"
+        description: "Scénarios : ucits (vu en USD), eur (vu en EUR), eurh (EUR, obligations couvertes), us"
+        default: "ucits,eur,eurh"
   schedule:
     - cron: "17 6 * * 1"
   pull_request:
@@ -38,6 +38,7 @@ on:
       - "config/universe_wide.yaml"
       - "config/tax_ucits.yaml"
       - "config/leverage.yaml"
+      - "config/eur.yaml"
       - "trading_engine/portfolio/financing.py"
       - "trading_engine/allocation/trend.py"
 
@@ -56,9 +57,10 @@ jobs:
       START: ${{ inputs.start || '2006-03-01' }}
       SYMBOLS: ${{ inputs.symbols || '' }}
       GRID: ${{ inputs.grid || 'allocation.target_vol=0.08,0.12,0.16' }}
-      VARIANTS: ${{ inputs.variants || 'lev15_tendance,lev15_tendance_lente,lev15_tendance_lente_m2,lev15_tendance_lente_m2_recolte,lev15_tendance_lente_redist_m2,lev30_tendance_lente_m2,lev30_tendance_lente_redist_m2' }}
+      VARIANTS: ${{ inputs.variants || 'lev15_tendance_lente_m2,lev15_tendance_lente_m2_recolte,lev30_tendance_lente_m2_recolte' }}
       EXTRA: ${{ inputs.overlays || 'config/leverage.yaml' }}
-      SCENARIOS: ${{ inputs.scenarios || 'ucits' }}
+      SCENARIOS: ${{ inputs.scenarios || 'ucits,eur,eurh' }}
+      HEDGED: TLT,IEF,TIP
       # Univers : 8 ETF, 3 classes d'actifs (DBC coté depuis février 2006).
       UNIVERSE: config/universe_wide.yaml
     steps:
@@ -103,25 +105,53 @@ jobs:
               fi
             done
           done
+      - name: Datasets vus en EUR (cours BCE ; obligations couvertes pour eurh)
+        if: contains(env.SCENARIOS, 'eur')
+        run: |
+          dir=data/backtest/csv_yahoo
+          files=()
+          for f in "$dir"/*.csv; do files+=("$(basename "$f" .csv)=$f"); done
+          ucits=(--overlay "$UNIVERSE" --overlay config/tax_ucits.yaml)
+          python -m trading_engine.backtest "${ucits[@]}" import-csv "${files[@]}" --net-dividends \
+            --currency EUR --rates-from data/backtest/daily.jsonl --out data/backtest/daily_eur.jsonl
+          python -m trading_engine.backtest "${ucits[@]}" import-csv "${files[@]}" --net-dividends \
+            --currency EUR --hedge "$HEDGED" --rates-from data/backtest/daily.jsonl --out data/backtest/daily_eurh.jsonl
       - name: Backtest — ETF US distribuants (précompte 30 %, TOB 0,35 %)
-        if: contains(env.SCENARIOS, 'us')
+        if: contains(format(',{0},', env.SCENARIOS), ',us,')
         run: |
           extra=(); for o in $EXTRA; do extra+=(--overlay "$o"); done
           python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay "$UNIVERSE" "${extra[@]}" run \
             --data data/backtest/daily_us.jsonl --grid "$GRID" --variants "$VARIANTS" \
             --out data/backtest/report_us.json
       - name: Backtest — UCITS capitalisants (Reynders, TOB 0,12 %)
-        if: contains(env.SCENARIOS, 'ucits')
+        if: contains(format(',{0},', env.SCENARIOS), ',ucits,')
         run: |
           extra=(); for o in $EXTRA; do extra+=(--overlay "$o"); done
           python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay "$UNIVERSE" \
             --overlay config/tax_ucits.yaml "${extra[@]}" run \
             --data data/backtest/daily_ucits.jsonl --grid "$GRID" --variants "$VARIANTS" \
             --out data/backtest/report_ucits.json
+      - name: Backtest — vu en EUR, change non couvert
+        if: contains(format(',{0},', env.SCENARIOS), ',eur,')
+        run: |
+          extra=(); for o in $EXTRA; do extra+=(--overlay "$o"); done
+          python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay "$UNIVERSE" \
+            --overlay config/tax_ucits.yaml "${extra[@]}" --overlay config/eur.yaml run \
+            --data data/backtest/daily_eur.jsonl --grid "$GRID" --variants "$VARIANTS" \
+            --out data/backtest/report_eur.json
+      - name: Backtest — vu en EUR, obligations couvertes
+        if: contains(format(',{0},', env.SCENARIOS), ',eurh,')
+        run: |
+          extra=(); for o in $EXTRA; do extra+=(--overlay "$o"); done
+          python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay "$UNIVERSE" \
+            --overlay config/tax_ucits.yaml "${extra[@]}" --overlay config/eur.yaml run \
+            --data data/backtest/daily_eurh.jsonl --grid "$GRID" --variants "$VARIANTS" \
+            --out data/backtest/report_eurh.json
       - name: Rapports dans le résumé
         if: always()
         run: |
-          for r in us:"ETF US distribuants" ucits:"UCITS irlandais de capitalisation"; do
+          for r in us:"ETF US distribuants" ucits:"UCITS irlandais de capitalisation (vu en USD)" \
+                   eur:"UCITS, vu en EUR (change non couvert)" eurh:"UCITS, vu en EUR, obligations couvertes en EUR"; do
             f="data/backtest/report_${r%%:*}.md"
             if [ -f "$f" ]; then
               { echo "# Scénario fiscal : ${r#*:}"; echo; cat "$f"; echo; } >> "$GITHUB_STEP_SUMMARY"

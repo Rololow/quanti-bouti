@@ -106,6 +106,8 @@ VARIANTS: dict[str, dict[str, Any]] = {
     # Récolte de l'exonération de 10 000 EUR (vente + rachat en décembre).
     "lev15_tendance_lente_m2_recolte": {**_LEV15, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0,
                                         "tax.harvest_exemption": True},
+    "lev30_tendance_lente_m2_recolte": {**_LEV30, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0,
+                                        "tax.harvest_exemption": True},
     "lev30_tendance_lente_redist_m2": {**_LEV30, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0,
                                        "allocation.trend.redistribute": True},
     "lev15_actions": {"allocation.method": "class_parity", "decision.include_alpha": False,
@@ -135,6 +137,7 @@ VARIANT_LABELS = {
     "lev30_tendance_lente_m2": "Levier -30 % + tendance lente, drawdown CPPI m=2",
     "lev30_tendance_lente_redist_m2": "Levier -30 % + tendance lente redistribuée, CPPI m=2",
     "lev15_tendance_lente_m2_recolte": "Levier -15 % + tendance lente, CPPI m=2, récolte de l'exonération",
+    "lev30_tendance_lente_m2_recolte": "Levier -30 % + tendance lente, CPPI m=2, récolte de l'exonération",
 }
 # Références à poids fixes, rebalancées chaque mois (calculées si leurs symboles
 # sont dans le dataset).
@@ -401,6 +404,10 @@ def load_fx(cfg: Config, dataset: Path) -> FxRates | None:
     path = fx_path(dataset)
     if cfg.fx.provider == "off":
         return None
+    if cfg.fx.portfolio_currency == "EUR":
+        # Portefeuille déjà en EUR (dataset importé avec --currency EUR) :
+        # colonnes EUR = colonnes du portefeuille, rien à convertir.
+        return FxRates("EUR", "EUR", {date(1970, 1, 1): 1.0}, source="portefeuille en EUR")
     if path.exists():
         with open(path, encoding="utf-8") as fh:
             return FxRates.from_payload(json.load(fh))
@@ -563,6 +570,13 @@ def caveats(cfg: Config, fx: FxRates | None, dividends: dict | None) -> list[str
         keep = ", ".join(f"{s} {k:.0%}" for s, k in sorted((dividends.get("keep") or {}).items()) if k is not None)
         out[2] = (f"Dividendes réinvestis NETS d'impôts sur les revenus (part gardée : {keep}) ; "
                   "exonération annuelle des petits dividendes ignorée.")
+    if dividends and dividends.get("currency") == "EUR":
+        out = [c for c in out if not c.startswith("Point de vue EUR")]
+        hedged = dividends.get("hedged") or []
+        out.insert(0, "Portefeuille en EUR : prix convertis au cours BCE du jour, cash et levier au taux euro "
+                      "(Euribor 3 mois BCE) ; risque, drawdown et limite de perte mesurés en EUR"
+                      + (f" ; couverts contre le dollar : {', '.join(hedged)} (rendement USD + taux EUR - "
+                         "taux USD - 0,1 %/an)." if hedged else "."))
     if cfg.tax.as_if_current_rules:
         out.insert(0, "Règles fiscales actuelles appliquées à tout l'historique (taxe de 10 % sur les plus-values "
                       "comme si elle existait depuis le début, sans step-up) : mesure des règles, pas du passé réel.")

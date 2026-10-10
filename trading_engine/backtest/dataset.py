@@ -27,7 +27,7 @@ from trading_engine.data.calendar import NY, MarketCalendar
 from trading_engine.data.events import BarEvent, MarketEvent, TradeEvent
 from trading_engine.data.market_feed import MarketFeed
 from trading_engine.storage.event_log import EventLogWriter, read_events
-from trading_engine.tax.fx import fetch_ecb_rates
+from trading_engine.tax.fx import FxRates, fetch_ecb_rates
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,12 @@ def rates_path(dataset: str | Path) -> Path:
     """Taux courts (T-bill) de la période, pour le financement."""
     dataset = Path(dataset)
     return dataset.with_name(dataset.name + ".rates.json")
+
+
+def eur_rates_path(dataset: str | Path) -> Path:
+    """Taux courts en euro (Euribor 3 mois BCE) : cash et couverture en EUR."""
+    dataset = Path(dataset)
+    return dataset.with_name(dataset.name + ".eur_rates.json")
 
 
 def fx_path(dataset: str | Path) -> Path:
@@ -231,7 +237,9 @@ def write_synthetic_dataset(
 
 def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: date | None = None,
                      end: date | None = None, keep: Mapping[str, float] | None = None,
-                     interest: Mapping[str, float] | None = None) -> dict:
+                     interest: Mapping[str, float] | None = None,
+                     to_eur: "FxRates | None" = None, hedged: Iterable[str] = (),
+                     carry: Callable[[date], float] | None = None) -> dict:
     """CSV quotidiens (un par symbole) -> dataset de barres 1d sur les séances NYSE.
 
     Colonnes reconnues (casse ignorée) : Date, Open, High, Low, Close, Volume
@@ -249,6 +257,13 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
     taxe Reynders à la revente ; leurs distributions × cette part s'accumulent
     en intérêts par part de l'indice (méta `interest_index`), base de la taxe
     calculée à chaque vente.
+
+    `to_eur` (cours BCE, USD par EUR) : prix exprimés en EUR (point de vue d'un
+    investisseur de la zone euro : P_EUR = P_USD / cours du jour). Les
+    symboles de `hedged` sont **couverts** contre le dollar (classe de parts
+    « EUR Hedged ») : leur rendement en EUR est celui en USD plus le
+    différentiel de taux `carry(jour)` = taux EUR - taux USD (couverture à
+    terme renouvelée chaque jour), sans effet de change.
     """
     import csv
 
@@ -257,6 +272,9 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
     net_keep: dict[str, float | None] = {}
     div_totals: dict[str, float] = {}
     interest_index: dict[str, list[list]] = {}
+    hedged = set(hedged)
+    if hedged and (to_eur is None or carry is None):
+        raise ValueError("hedged symbols need to_eur (FX) and carry (rate differential)")
     for sym, file in sorted(files.items()):
         with open(file, encoding="utf-8-sig", newline="") as fh:
             reader = csv.DictReader(fh)
@@ -276,6 +294,7 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
         net_keep[sym] = keep[sym] if net else None
         calendar = MarketCalendar.from_rules(min(days), max(days))
         index = prev_close = None
+        out_prev = usd_prev = prev_day = None      # couverture : valeur EUR et indice USD de la veille
         for r, day in zip(rows, days):
             if (start and day < start) or (end and day > end):
                 continue
@@ -291,17 +310,29 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
             if session is None or min(o, h, low, c) <= 0 or c <= 0:
                 skipped[sym] = skipped.get(sym, 0) + 1
                 continue
+            accrued = None                      # distribution par part de l'indice (USD)
             if net:
                 if interest and sym in interest and div and index is not None:
-                    # distribution par part de l'indice (avant réinvestissement)
-                    cum = (interest_index[sym][-1][1] if interest_index.get(sym) else 0.0)
-                    cum += interest[sym] * div * index / prev_close
-                    interest_index.setdefault(sym, []).append([day.isoformat(), cum])
+                    accrued = interest[sym] * div * index / prev_close
                 index = c if index is None else index * (c + keep[sym] * div) / prev_close
                 prev_close, adj = c, index
                 div_totals[sym] = div_totals.get(sym, 0.0) + div
-            k = adj / c
-            o, h, low, c = o * k, max(o, h, low, c) * k, min(o, h, low, c) * k, adj
+            out = adj                           # clôture publiée (USD, ou EUR)
+            if sym in hedged:
+                # EUR couvert : rendement USD de l'indice + différentiel de taux.
+                if out_prev is None:
+                    out = adj / to_eur.rate(day)
+                else:
+                    out = out_prev * adj / usd_prev * (1.0 + carry(prev_day) * (day - prev_day).days / 365.0)
+                out_prev, usd_prev, prev_day = out, adj, day
+            elif to_eur is not None:
+                out = adj / to_eur.rate(day)
+            if accrued is not None:
+                cum = (interest_index[sym][-1][1] if interest_index.get(sym) else 0.0)
+                cum += accrued * out / adj          # même unité que le prix publié
+                interest_index.setdefault(sym, []).append([day.isoformat(), cum])
+            k = out / c
+            o, h, low, c = o * k, max(o, h, low, c) * k, min(o, h, low, c) * k, out
             bars.append(BarEvent(timestamp=session.open, end=session.close, received_at=session.close, symbol=sym,
                                  source="csv_dataset", timeframe="1d", open=o, high=h, low=low, close=c,
                                  volume=max(v, 0.0)))
@@ -311,7 +342,8 @@ def import_daily_csv(files: dict[str, str | Path], path: str | Path, *, start: d
     with EventLogWriter(path) as writer:
         for bar in bars:
             writer.write(bar)
-    meta = {"dividends": "net" if keep is not None else "gross (Adj Close)", "keep": net_keep}
+    meta = {"dividends": "net" if keep is not None else "gross (Adj Close)", "keep": net_keep,
+            "currency": "EUR" if to_eur is not None else "USD", "hedged": sorted(hedged)}
     if interest_index:
         meta["interest_index"] = interest_index
     meta_path(path).write_text(json.dumps(meta), encoding="utf-8")
