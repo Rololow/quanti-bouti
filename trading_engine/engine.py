@@ -620,6 +620,17 @@ class Engine:
             if order is None:
                 notes.append(f"{sym}: quantité arrondie à zéro")
                 continue
+            if order.quantity < 0 and c.min_weight >= 0:
+                # Long-only : jamais plus que la quantité détenue. Le notionnel
+                # (au dernier cours) divisé par une limite de vente plus basse
+                # dépasserait la position d'une part sur une grosse ligne.
+                pos = self.portfolio.positions.get(sym)
+                held = 0.0 if pos is None else max(pos.quantity, 0.0)
+                if held <= 1e-9:
+                    notes.append(f"{sym}: vente sans position")
+                    continue
+                if -order.quantity > held:
+                    order = dataclasses.replace(order, quantity=-held)
             session = None if self.calendar is None else self.calendar.session_at(order.timestamp)
             if session is not None and order.expires_at > session.close:
                 order = dataclasses.replace(order, duration=session.close - order.timestamp)

@@ -88,6 +88,45 @@ def yahoo_short_rates(start: date, end: date, *, http_get: Callable[[str], str] 
     return {date.fromisoformat(r["Date"]): float(r["Close"]) / 100.0 for r in rows}
 
 
+ECB_DATA_URL = "https://data-api.ecb.europa.eu/service/data/{key}"
+# Euribor 3 mois (moyenne mensuelle), puis taux de la facilité de dépôt (repli).
+ECB_EUR_RATE_KEYS = ("FM/M.U2.EUR.RT.MM.EURIBOR3MD_.HSTA", "FM/D.U2.EUR.4F.KR.DFR.LEV")
+
+
+def _ecb_period(text: str) -> date:
+    """« 2006-03 » (mois) -> 1er jour du mois SUIVANT (la moyenne du mois n'est
+    connue qu'à sa fin : pas de regard vers le futur) ; « 2006-03-08 » tel quel."""
+    if len(text) == 7:
+        y, m = int(text[:4]), int(text[5:7])
+        return date(y + m // 12, m % 12 + 1, 1)
+    return date.fromisoformat(text[:10])
+
+
+def ecb_euro_short_rates(start: date, end: date, *, http_get: Callable[[str], str] = _get,
+                         keys: Iterable[str] = ECB_EUR_RATE_KEYS) -> tuple[dict[date, float], str]:
+    """Taux court en euro (décimal annuel) par jour de publication, et la série
+    utilisée. Premier jeu de `keys` qui répond avec des données."""
+    errors = []
+    for key in keys:
+        query = urllib.parse.urlencode({"startPeriod": start.isoformat()[:7] if key.startswith("FM/M")
+                                        else start.isoformat(), "endPeriod": end.isoformat(),
+                                        "format": "csvdata"})
+        try:
+            text = http_get(f"{ECB_DATA_URL.format(key=key)}?{query}")
+        except Exception as exc:
+            errors.append(f"{key}: {exc}")
+            continue
+        rates = {}
+        for row in csv.DictReader(io.StringIO(text)):
+            value, period = (row.get("OBS_VALUE") or "").strip(), (row.get("TIME_PERIOD") or "").strip()
+            if value and period:
+                rates[_ecb_period(period)] = float(value) / 100.0
+        if rates:
+            return rates, f"ecb {key}"
+        errors.append(f"{key}: no data")
+    raise LookupError("ECB euro short rates unavailable: " + "; ".join(errors))
+
+
 def download_csvs(symbols: Iterable[str], start: date, end: date, directory: str | Path, *,
                   source: str = "yahoo", retries: int = 3, pause: float = 2.0,
                   http_get: Callable[[str], str] = _get, sleep: Callable[[float], None] = time.sleep) -> dict[str, Path]:

@@ -211,6 +211,33 @@ précédentes ; la ligne « walk-forward » est le seul résultat hors
 échantillon. Autres grilles : `--grid decision.risk_aversion=5,20 --grid
 decision.holding_period=60d,120d`.
 
+**Portefeuille vu en EUR** (`config/eur.yaml`, dataset importé avec
+`import-csv --currency EUR`) : pour un investisseur belge, le risque qui
+compte est celui de la valeur en euros, change compris. Les prix sont
+convertis au cours BCE du jour, le cash et le levier suivent le taux euro
+(Euribor 3 mois BCE, téléchargé avec les données) ; covariance, ciblage de
+volatilité, contrôle du drawdown et limite de perte portent alors sur la
+valeur en EUR. Vu en USD, le moteur respectait sa limite de -15 % alors
+que l'investisseur en EUR perdait jusqu'à -17 %.
+
+`--hedge TLT,IEF,TIP` simule des classes de parts **couvertes en EUR** :
+rendement en USD + (taux EUR - taux USD) - 0,1 %/an (`--hedge-cost`), sans
+effet de change. Les obligations redeviennent un amortisseur à faible
+volatilité en EUR ; la couverture coûte le différentiel de taux (jusqu'à
+3 %/an quand les taux US dépassent nettement les taux euro).
+
+```bash
+python -m trading_engine.backtest --overlay config/universe_wide.yaml --overlay config/tax_ucits.yaml \
+  import-csv SPY=... --net-dividends --currency EUR --hedge TLT,IEF,TIP --out data/backtest/daily_eurh.jsonl
+python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay config/universe_wide.yaml \
+  --overlay config/tax_ucits.yaml --overlay config/leverage.yaml --overlay config/eur.yaml \
+  run --data data/backtest/daily_eurh.jsonl
+```
+
+Le workflow `backtest` compare trois scénarios : `ucits` (vu en USD),
+`eur` (vu en EUR, change non couvert) et `eurh` (vu en EUR, obligations
+couvertes) ; les références sont calculées sur les mêmes séries.
+
 **Impôts différés, mêmes règles pour le moteur et les références** :
 
 - **Reynders à la revente** : l'import (`--net-dividends`) cumule, pour les

@@ -1,0 +1,15 @@
+# Surcouche : portefeuille vu par un investisseur de la zone euro.
+#
+# À utiliser avec un dataset importé en EUR :
+#   python -m trading_engine.backtest --overlay config/universe_wide.yaml --overlay config/tax_ucits.yaml \
+#     import-csv SPY=... --net-dividends --currency EUR [--hedge TLT,IEF,TIP] --out data/backtest/daily_eur.jsonl
+#
+# Prix en EUR (cours BCE du jour), cash rémunéré et levier financé au taux
+# euro (Euribor 3 mois), TOB et impôts sans conversion. Tout le pilotage du
+# risque — covariance, ciblage de volatilité, contrôle du drawdown, limite de
+# perte — porte alors sur la valeur en EUR, celle que l'investisseur voit,
+# change compris. Avec --hedge, les fonds obligataires sont des classes de
+# parts couvertes en EUR : rendement USD + (taux EUR - taux USD), sans change.
+
+fx:
+  portfolio_currency: EUR

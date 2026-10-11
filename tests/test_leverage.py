@@ -337,3 +337,27 @@ def test_cppi_multiplier_keeps_exposure_in_small_drawdowns():
     assert gz._drawdown_scale() == 0.0 and cppi._drawdown_scale() == 0.0
     with pytest.raises(ValueError):
         AllocationConfig(drawdown_multiplier=0.5)
+
+
+def test_full_exit_never_sells_more_than_held():
+    """Vente totale d'une grosse ligne : notionnel au dernier cours / limite de
+    vente plus basse = une part de trop -> position courte (INVARIANT SHORT)."""
+    from trading_engine.decision.rebalance import UREBALANCE, Decision, SymbolDecision
+
+    cfg = load_config()
+    cfg = dataclasses.replace(cfg, execution=dataclasses.replace(cfg.execution, mode="paper"))
+    e = Engine(cfg)
+    t = datetime(2026, 3, 2, 16, tzinfo=UTC)
+    sym = e.universe()[0]
+    e.portfolio.cash = 0.0
+    e.portfolio.apply_fill(sym, 2_000, 100.0)
+    e.portfolio.update_price(sym, 100.0, t)
+    e._quote = lambda s: (98.9, 99.0)                         # le marché a baissé depuis le dernier cours
+    e.hard_controls.max_order_quantity = lambda *a, **k: float("inf")
+    d = Decision(decision_id="D1", timestamp=t, action=UREBALANCE, fraction=1.0,
+                 symbols={sym: SymbolDecision(sym, 1.0, 0.0, 0.0, -200_000.0)},
+                 risk_benefit=1_000.0, urgency=1.0)
+    plan = e.plan_execution(d, e.safety.status)
+    proposed = list(plan.orders) + [r.order for r in plan.rejected]
+    sells = [o for o in proposed if o.symbol == sym]
+    assert sells and sells[0].quantity == -2_000            # sans le plafond : -2 022

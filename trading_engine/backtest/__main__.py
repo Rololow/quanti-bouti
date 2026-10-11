@@ -34,6 +34,31 @@ def _date(text: str) -> date:
     return date.fromisoformat(text)
 
 
+def _eur_inputs(source: Path, hedged: list[str], hedge_cost: float) -> dict:
+    """Change BCE, taux USD et taux EUR du dataset `source` (taux EUR
+    téléchargés si absents) -> arguments de `import_daily_csv` en EUR."""
+    from trading_engine.backtest.dataset import eur_rates_path, fx_path, rates_path
+    from trading_engine.backtest.sources import ecb_euro_short_rates
+    from trading_engine.portfolio.financing import RateSeries
+    from trading_engine.tax.fx import FxRates
+
+    if not fx_path(source).exists():
+        raise SystemExit(f"--currency EUR : cours BCE introuvables ({fx_path(source)}) ; lancer download-daily")
+    fx = FxRates.from_payload(json.loads(fx_path(source).read_text(encoding="utf-8")))
+    if eur_rates_path(source).exists():
+        eur = RateSeries.from_payload(json.loads(eur_rates_path(source).read_text(encoding="utf-8")))
+    else:
+        rates, src = ecb_euro_short_rates(fx.first - timedelta(days=40), fx.last)
+        eur = RateSeries(rates, src)
+    out = {"to_eur": fx, "eur_rates": eur, "hedged": hedged}
+    if hedged:
+        if not rates_path(source).exists():
+            raise SystemExit(f"--hedge : taux USD introuvables ({rates_path(source)})")
+        usd = RateSeries.from_payload(json.loads(rates_path(source).read_text(encoding="utf-8")))
+        out["carry"] = lambda day: eur.rate(day) - usd.rate(day) - hedge_cost
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -77,6 +102,14 @@ def main(argv: list[str] | None = None) -> int:
     imp.add_argument("--no-fx", action="store_true", help="ne pas télécharger les taux BCE")
     imp.add_argument("--net-dividends", action="store_true",
                      help="réinvestir les dividendes nets d'impôts (profil fiscal et instruments de la config)")
+    imp.add_argument("--currency", choices=["USD", "EUR"], default="USD",
+                     help="EUR : prix convertis au cours BCE du jour, cash et financement au taux euro")
+    imp.add_argument("--hedge", default="",
+                     help="symboles couverts contre le dollar (parts « EUR Hedged »), ex. TLT,IEF,TIP")
+    imp.add_argument("--hedge-cost", type=float, default=0.001,
+                     help="coût annuel de la couverture (frais de la classe couverte, terme), défaut 0,1 %%")
+    imp.add_argument("--rates-from", default="data/backtest/daily.jsonl",
+                     help="dataset dont reprendre change BCE, taux USD et taux EUR (avec --currency EUR)")
     imp.add_argument("--out", default="data/backtest/daily.jsonl")
 
     run = sub.add_parser("run", help="lance le backtest")
@@ -141,8 +174,22 @@ def main(argv: list[str] | None = None) -> int:
             # Reynders à la revente : intérêts accumulés par part (base de la taxe).
             interest = {sym: min(model.instrument(sym).bond_share, 1.0) * (1.0 - model.instrument(sym).fund_withholding)
                         for sym in files if model.interest_tax_applies(sym)}
+        eur = {}
+        if getattr(args, "currency", "USD") == "EUR":
+            eur = _eur_inputs(resolve_path(args.rates_from), [s.strip().upper() for s in args.hedge.split(",")
+                                                             if s.strip()], args.hedge_cost)
         summary = import_daily_csv(files, out, start=args.start, end=args.end, keep=keep,
-                                   interest=interest if keep is not None else None)
+                                   interest=interest if keep is not None else None,
+                                   **{k: v for k, v in eur.items() if k != "eur_rates"})
+        if eur:
+            # Portefeuille en EUR : cash et financement au taux euro ; pas de
+            # fichier de change (rien à convertir).
+            from trading_engine.backtest.dataset import rates_path
+
+            rates_path(out).write_text(json.dumps(eur["eur_rates"].to_payload()), encoding="utf-8")
+            summary.update(currency="EUR", hedged=eur["hedged"], rates=eur["eur_rates"].source)
+            print(summary)
+            return 0 if summary["bars"] else 1
         if not summary["bars"]:
             print(summary)
             return 1
@@ -168,6 +215,19 @@ def main(argv: list[str] | None = None) -> int:
                 summary["fx"] = len(rates)
             except Exception as exc:             # le backtest utilisera le taux fixe
                 summary["fx"] = f"non téléchargé ({exc})"
+        if args.command == "download-daily" and not args.no_fx:
+            # Taux courts en euro : portefeuille vu en EUR, couverture de change.
+            from trading_engine.backtest.dataset import eur_rates_path
+            from trading_engine.backtest.sources import ecb_euro_short_rates
+            from trading_engine.portfolio.financing import RateSeries
+
+            try:
+                rates, source = ecb_euro_short_rates(date.fromisoformat(summary["start"]) - timedelta(days=40),
+                                                     date.fromisoformat(summary["end"]))
+                eur_rates_path(out).write_text(json.dumps(RateSeries(rates, source).to_payload()), encoding="utf-8")
+                summary["eur_rates"] = f"{len(rates)} ({source})"
+            except Exception as exc:
+                summary["eur_rates"] = f"non téléchargés ({exc})"
         print(summary)
         return 0
 
