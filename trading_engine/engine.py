@@ -211,6 +211,7 @@ class Engine:
                                  else None)
         self.drawdown_limit_used: float | None = None     # limite effective (marge de gap comprise)
         self.last_drawdown_scale: float | None = None
+        self._applied_gross: float | None = None          # niveau d'exposition (bande gross_band)
         self.trend: TrendFilter | None = None
         if alloc.trend.enabled:
             if alloc.trend.timeframe not in config.bar_timeframes:
@@ -1236,6 +1237,23 @@ class Engine:
             scale = alloc.drawdown_multiplier * (1.0 - (1.0 - limit) / (1.0 - dd)) / limit
         return max(self.config.allocation.drawdown_min_scale, min(1.0, scale))
 
+    def _apply_gross_band(self, requested: dict[str, float], attribution: dict) -> None:
+        """Niveau d'exposition gardé tant que le ciblage de volatilité ne le
+        déplace pas d'au moins `gross_band` (en relatif)."""
+        band = self.config.allocation.gross_band
+        gross = sum(abs(w) for w in requested.values())
+        if band <= 0 or gross <= 0:
+            self._applied_gross = gross or self._applied_gross
+            return
+        held = self._applied_gross
+        if held is not None and held > 0 and abs(gross / held - 1.0) < band:
+            k = held / gross
+            for sym in requested:
+                attribution.setdefault(sym, {})["gross_band"] = requested[sym] * (k - 1.0)
+                requested[sym] *= k
+        else:
+            self._applied_gross = gross
+
     def _apply_trend(self, requested: dict[str, float], attribution: dict, symbols: list[str],
                      cov: np.ndarray | None) -> None:
         """Filtre de tendance : poids × score de tendance ; avec `redistribute`,
@@ -1273,6 +1291,7 @@ class Engine:
             requested, attribution, _ = self.allocator.allocate(symbols, cov, signals, None)
         else:
             return  # pas encore de covariance : on garde la cible actuelle
+        self._apply_gross_band(requested, attribution)
         if self.trend is not None:
             self._apply_trend(requested, attribution, symbols, cov)
         scale = self._drawdown_scale()

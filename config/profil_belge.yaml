@@ -1,0 +1,52 @@
+# Profil retenu pour un investisseur belge (résultat des étapes 1 à 6 du
+# backtest, 2007-2026, vu en EUR, impôts belges compris) :
+#
+#   python -m trading_engine.backtest --overlay config/backtest_daily.yaml \
+#     --overlay config/profil_belge.yaml run --data data/backtest/daily_eur.jsonl
+#
+# - 8 ETF UCITS irlandais de capitalisation (actions US, Europe/Japon,
+#   émergents ; obligations US longues, moyennes, indexées ; or ; matières
+#   premières), TOB 0,12 %, Reynders à la revente ;
+# - portefeuille en EUR (change non couvert : les obligations couvertes ont
+#   fait moins bien) ;
+# - parité de risque par classe, vol cible 12 %, levier jusqu'à 2× ;
+# - filtre de tendance lent (hebdomadaire, 2 horizons sur 4) ;
+# - limite de perte -15 % : CPPI m=2, réduction de risque forcée, marge de
+#   chute, plus haut érodé de 10 %/an ;
+# - bande de 10 % sur le niveau d'exposition (moins de rotation, moins de TOB).
+#
+# Résultats et limites : README, section « Profil belge ». Rien de tout ceci
+# n'est un conseil en investissement ni un conseil fiscal.
+
+include:
+  - universe_wide.yaml
+  - tax_ucits.yaml
+  - leverage.yaml
+  - eur.yaml
+
+allocation:
+  method: class_parity
+  target_vol: 0.12
+  drawdown_control: 0.15
+  drawdown_multiplier: 2.0
+  drawdown_window_days: null
+  drawdown_peak_decay: 0.10
+  drawdown_gap_sigmas: 2.33
+  drawdown_gap_days: 2.0
+  gross_band: 0.10
+  trend:
+    enabled: true
+    timeframe: 1d
+    horizons: [21, 63, 126, 252]
+    floor: 0.0
+    redistribute: false
+    update_every: 5
+    min_change: 0.5
+
+decision:
+  include_alpha: false
+  force_risk_reduction: 0.10
+
+risk:
+  limits:
+    max_drawdown: 0.15

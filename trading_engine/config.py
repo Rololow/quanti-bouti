@@ -153,6 +153,12 @@ class AllocationConfig:
     # l'exposition baisse tôt. Jamais sous 40 % de la limite.
     drawdown_gap_sigmas: float = 0.0
     drawdown_gap_days: float = 2.0
+    # Bande sur le niveau d'exposition issu du ciblage de volatilité : tant
+    # que l'exposition brute demandée reste à moins de cette part (ex. 0.10)
+    # de la dernière appliquée, on garde l'ancienne (la forme du portefeuille
+    # suit, pas son niveau). Évite de tout retoucher pour du bruit de
+    # volatilité. Tendance et contrôle du drawdown s'appliquent ensuite, sans bande.
+    gross_band: float = 0.0
     trend: TrendConfig = field(default_factory=TrendConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     constraints: Constraints = field(default_factory=Constraints)
@@ -175,6 +181,8 @@ class AllocationConfig:
                 raise ValueError("allocation.drawdown_peak_decay must be in (0, 1)")
             if self.drawdown_window_days is not None:
                 raise ValueError("allocation.drawdown_peak_decay and drawdown_window_days are exclusive")
+        if not 0 <= self.gross_band < 1:
+            raise ValueError("allocation.gross_band must be in [0, 1)")
         if self.drawdown_gap_sigmas < 0 or self.drawdown_gap_days <= 0:
             raise ValueError("allocation.drawdown_gap_sigmas must be >= 0 and drawdown_gap_days > 0")
         if self.drawdown_window_days is not None and self.drawdown_window_days < 1:
@@ -575,11 +583,29 @@ def deep_merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+def read_overlay(path: str | Path, _seen: tuple[Path, ...] = ()) -> dict:
+    """Surcouche YAML ; la clé `include` (liste de fichiers, relatifs au
+    fichier puis à la racine du projet) charge d'abord d'autres surcouches,
+    que le fichier complète ou remplace."""
+    path = Path(path).resolve()
+    if path in _seen:
+        raise ValueError(f"circular config include: {path}")
+    with open(path, encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+    includes = raw.pop("include", None) or []
+    merged: dict = {}
+    for inc in ([includes] if isinstance(includes, str) else includes):
+        candidate = path.parent / inc
+        if not candidate.exists():
+            candidate = PROJECT_ROOT / inc
+        merged = deep_merge(merged, read_overlay(candidate, _seen + (path,)))
+    return deep_merge(merged, raw)
+
+
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH, overlays: tuple[str | Path, ...] = ()) -> Config:
     """Config de base + surcouches éventuelles (ex. config/backtest.yaml)."""
     with open(path, encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     for overlay in overlays:
-        with open(overlay, encoding="utf-8") as fh:
-            raw = deep_merge(raw, yaml.safe_load(fh) or {})
+        raw = deep_merge(raw, read_overlay(overlay))
     return Config.from_dict(raw)

@@ -435,3 +435,46 @@ def test_worst_drawdown_dates():
     assert (w["peak"], w["trough"], w["recovered"]) == (d[1], d[3], d[5])
     assert worst_drawdown(list(zip(d[:3], [100, 101, 102]))) is None
     assert worst_drawdown(list(zip(d[:3], [100, 90, 95])))["recovered"] is None
+
+
+# ------------------------------------------------------------------ étape 6 : profil belge, bande d'exposition
+
+def test_overlay_include_and_cycle(tmp_path):
+    from trading_engine.config import read_overlay
+
+    (tmp_path / "base.yaml").write_text("allocation: {target_vol: 0.20, method: class_parity}\n", encoding="utf-8")
+    (tmp_path / "top.yaml").write_text("include: [base.yaml]\nallocation: {target_vol: 0.12}\n", encoding="utf-8")
+    assert read_overlay(tmp_path / "top.yaml") == {"allocation": {"target_vol": 0.12, "method": "class_parity"}}
+    (tmp_path / "loop.yaml").write_text("include: loop.yaml\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="circular"):
+        read_overlay(tmp_path / "loop.yaml")
+
+
+def test_belgian_profile_bundles_the_retained_settings():
+    cfg = load_config("config/config.yaml", (PROJECT_ROOT / "config" / "profil_belge.yaml",))
+    a = cfg.allocation
+    assert cfg.fx.portfolio_currency == "EUR" and cfg.instruments["TLT"].distribution == "accumulating"
+    assert (a.method, a.target_vol, a.drawdown_control, a.drawdown_multiplier) == ("class_parity", 0.12, 0.15, 2.0)
+    assert a.drawdown_window_days is None and a.drawdown_peak_decay == 0.10 and a.drawdown_gap_sigmas == 2.33
+    assert a.gross_band == 0.10 and a.trend.enabled and a.trend.update_every == 5
+    assert cfg.decision.force_risk_reduction == 0.10 and cfg.allocation.constraints.max_gross == 2.0
+    assert set(cfg.feed.symbols) == {"SPY", "EFA", "EEM", "TLT", "IEF", "TIP", "GLD", "DBC"}
+
+
+def test_gross_band_holds_the_exposure_level():
+    cfg = load_config()
+    e = Engine(dataclasses.replace(cfg, allocation=dataclasses.replace(cfg.allocation, gross_band=0.10)))
+
+    def step(a, b):
+        req, attr = {"A": a, "B": b}, {}
+        e._apply_gross_band(req, attr)
+        return req
+
+    assert step(0.5, 0.5) == {"A": 0.5, "B": 0.5}             # premier niveau : appliqué
+    held = step(0.6, 0.45)                                    # +5 % : niveau gardé, forme suivie
+    assert sum(held.values()) == pytest.approx(1.0) and held["A"] / held["B"] == pytest.approx(0.6 / 0.45)
+    assert sum(step(0.6, 0.55).values()) == pytest.approx(1.15)   # +15 % : nouveau niveau
+    assert sum(step(0.55, 0.53).values()) == pytest.approx(1.15)  # -6 % de 1,15 : gardé
+    assert sum(step(0.5, 0.5).values()) == pytest.approx(1.0)     # -13 % : appliqué
+    with pytest.raises(ValueError):
+        AllocationConfig(gross_band=1.0)
