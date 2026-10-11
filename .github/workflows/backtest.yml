@@ -20,13 +20,13 @@ on:
         default: "allocation.target_vol=0.08,0.12,0.16"
       variants:
         description: "Variantes du moteur"
-        default: "lev15_tendance_lente_m2,lev15_tendance_lente_m2_recolte,lev30_tendance_lente_m2_recolte"
+        default: "lev15_tendance_lente_m2,lev15_m2_force,lev15_m2_force_gap,lev15_m2_force_gap_decay,lev15_gz_force_gap_decay,lev30_tendance_lente_m2_recolte"
       overlays:
         description: "Surcouches supplémentaires (séparées par des espaces)"
         default: "config/leverage.yaml"
       scenarios:
         description: "Scénarios : ucits (vu en USD), eur (vu en EUR), eurh (EUR, obligations couvertes), us"
-        default: "ucits,eur,eurh"
+        default: "eur"
   schedule:
     - cron: "17 6 * * 1"
   pull_request:
@@ -57,9 +57,9 @@ jobs:
       START: ${{ inputs.start || '2006-03-01' }}
       SYMBOLS: ${{ inputs.symbols || '' }}
       GRID: ${{ inputs.grid || 'allocation.target_vol=0.08,0.12,0.16' }}
-      VARIANTS: ${{ inputs.variants || 'lev15_tendance_lente_m2,lev15_tendance_lente_m2_recolte,lev30_tendance_lente_m2_recolte' }}
+      VARIANTS: ${{ inputs.variants || 'lev15_tendance_lente_m2,lev15_m2_force,lev15_m2_force_gap,lev15_m2_force_gap_decay,lev15_gz_force_gap_decay,lev30_tendance_lente_m2_recolte' }}
       EXTRA: ${{ inputs.overlays || 'config/leverage.yaml' }}
-      SCENARIOS: ${{ inputs.scenarios || 'ucits,eur,eurh' }}
+      SCENARIOS: ${{ inputs.scenarios || 'eur' }}
       HEDGED: TLT,IEF,TIP
       # Univers : 8 ETF, 3 classes d'actifs (DBC coté depuis février 2006).
       UNIVERSE: config/universe_wide.yaml

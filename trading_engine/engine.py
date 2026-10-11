@@ -79,7 +79,7 @@ from trading_engine.backtest.dataset import (BarDatasetFeed, fx_path as dataset_
                                              rates_path as dataset_rates_path)
 from trading_engine.data.calendar import NY, MarketCalendar
 from trading_engine.execution.volume import VolumeTracker
-from trading_engine.risk.portfolio_risk import RollingDrawdown, portfolio_vol
+from trading_engine.risk.portfolio_risk import DecayingPeakDrawdown, RollingDrawdown, portfolio_vol
 from trading_engine.risk.risk_engine import RiskEngine, RiskReport
 from trading_engine.robustness.stress import StressReport, stress_test
 from trading_engine.safety.invariants import InvariantMonitor
@@ -206,8 +206,11 @@ class Engine:
         self._last_session_decision: date | None = None
         self.rates: RateSeries | None = None
         alloc = config.allocation
-        self.rolling_drawdown = (None if alloc.drawdown_window_days is None
-                                 else RollingDrawdown(alloc.drawdown_window_days))
+        self.rolling_drawdown = (RollingDrawdown(alloc.drawdown_window_days) if alloc.drawdown_window_days
+                                 else DecayingPeakDrawdown(alloc.drawdown_peak_decay) if alloc.drawdown_peak_decay
+                                 else None)
+        self.drawdown_limit_used: float | None = None     # limite effective (marge de gap comprise)
+        self.last_drawdown_scale: float | None = None
         self.trend: TrendFilter | None = None
         if alloc.trend.enabled:
             if alloc.trend.timeframe not in config.bar_timeframes:
@@ -1115,6 +1118,7 @@ class Engine:
             adv={s: self.volume.adv(s) for s in symbols},
             execution_confidence=self.execution_feedback.execution_confidence,
             max_gross=gross_cap_of(self.config.allocation.constraints),
+            drawdown_scale=self.last_drawdown_scale,
         )
 
     def decide(self, status: SafetyStatus) -> Decision:
@@ -1219,12 +1223,17 @@ class Engine:
         limit = self.config.allocation.drawdown_control
         if not limit:
             return 1.0
+        alloc = self.config.allocation
         tracker = self.rolling_drawdown or self.risk.portfolio_drawdown
         dd = -min(0.0, tracker.drawdown)
+        if alloc.drawdown_gap_sigmas > 0 and self.risk_report is not None and self.risk_report.portfolio_vol:
+            gap = alloc.drawdown_gap_sigmas * self.risk_report.portfolio_vol * math.sqrt(alloc.drawdown_gap_days / 252)
+            limit = max(0.4 * limit, limit - gap)
+        self.drawdown_limit_used = limit
         if dd >= limit:
             scale = 0.0
         else:
-            scale = self.config.allocation.drawdown_multiplier * (1.0 - (1.0 - limit) / (1.0 - dd)) / limit
+            scale = alloc.drawdown_multiplier * (1.0 - (1.0 - limit) / (1.0 - dd)) / limit
         return max(self.config.allocation.drawdown_min_scale, min(1.0, scale))
 
     def _apply_trend(self, requested: dict[str, float], attribution: dict, symbols: list[str],
@@ -1267,6 +1276,7 @@ class Engine:
         if self.trend is not None:
             self._apply_trend(requested, attribution, symbols, cov)
         scale = self._drawdown_scale()
+        self.last_drawdown_scale = scale if self.config.allocation.drawdown_control else None
         if scale < 1.0:
             for sym in requested:
                 attribution.setdefault(sym, {})["drawdown_control"] = requested[sym] * (scale - 1.0)

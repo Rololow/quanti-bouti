@@ -75,6 +75,12 @@ class DecisionConfig:
     # avec levier) : désendettement forcé vers la cible, sans bande ni calcul
     # coût/bénéfice (le risque de marge n'est pas dans ce calcul).
     delever_tolerance: float = 0.05
+    # Réduction de risque forcée : pendant une perte (contrôle du drawdown
+    # actif), si l'exposition brute cible est inférieure d'au moins cette part
+    # à l'exposition courante, la réduction est exécutée en entier et tout de
+    # suite. Le calcul coût/bénéfice la rognait (fractions 25-50 %) et
+    # la retardait au pire moment. None = désactivé.
+    force_risk_reduction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +170,7 @@ class DecisionContext:
     adv: Mapping[str, float | None] = field(default_factory=dict)
     execution_confidence: float | None = None
     max_gross: float | None = None        # plafond d'exposition brute (désendettement forcé)
+    drawdown_scale: float | None = None   # échelle du contrôle du drawdown (< 1 : perte en cours)
 
 
 class DecisionEngine:
@@ -259,8 +266,16 @@ class DecisionEngine:
         w_t_full = np.array([ctx.target.get(s, ctx.current.get(s, 0.0)) for s in symbols])
 
         gross_c = float(np.abs(w_c).sum())
-        delever = (ctx.max_gross is not None and gross_c > ctx.max_gross + cfg.delever_tolerance
-                   and float(np.abs(w_t_full).sum()) < gross_c)
+        gross_t = float(np.abs(w_t_full).sum())
+        over_cap = (ctx.max_gross is not None and gross_c > ctx.max_gross + cfg.delever_tolerance
+                    and gross_t < gross_c)
+        # Seulement pendant une perte (contrôle du drawdown actif) : ailleurs,
+        # les variations du ciblage de volatilité restent soumises au calcul
+        # coût/bénéfice (sinon la rotation explose).
+        reduce = (cfg.force_risk_reduction is not None and gross_c > 0
+                  and ctx.drawdown_scale is not None and ctx.drawdown_scale < 1.0
+                  and gross_t < gross_c * (1.0 - cfg.force_risk_reduction))
+        delever = over_cap or reduce
 
         # Symboles exclus : ils restent à leur poids courant.
         excluded: dict[str, str] = {}
@@ -334,8 +349,10 @@ class DecisionEngine:
         urgency = max(alpha, 0.0) / gross_benefit if gross_benefit > 0 else 0.0
         reasons = self._reasons(per_symbol, risk_benefit, alpha, costs, sigma, net, f, tracking_error)
         action = UREBALANCE if net > cfg.min_net_benefit or delever else UDONOTHING
-        if delever:
+        if over_cap:
             reasons.insert(0, f"désendettement forcé : exposition brute {gross_c:.2f} > plafond {ctx.max_gross:.2f}")
+        elif reduce:
+            reasons.insert(0, f"réduction de risque forcée : exposition brute {gross_c:.2f} -> {gross_t:.2f}")
         if action == UDONOTHING:
             reasons.insert(0, "le bénéfice ne couvre pas coûts + incertitude")
             f, per_symbol = 0.0, {
