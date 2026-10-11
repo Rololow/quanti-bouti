@@ -170,6 +170,34 @@ sur levier (un arrêt figerait les positions levées au pire moment), et si les
 prix font dériver l'exposition au-delà du plafond + `decision.delever_tolerance`,
 la décision désendette vers la cible sans calcul coût/bénéfice.
 
+### Profil belge (`config/profil_belge.yaml`)
+
+La configuration retenue après les étapes 1 à 6, en un seul fichier (qui
+inclut `universe_wide.yaml`, `tax_ucits.yaml`, `leverage.yaml` et
+`eur.yaml` grâce à la clé `include`) :
+
+| Élément | Réglage |
+|---|---|
+| Univers | 8 ETF UCITS irlandais de capitalisation (actions US, hors US, émergents ; obligations US 20 ans, 7-10 ans, indexées ; or ; matières premières) |
+| Devise | portefeuille en EUR, change non couvert |
+| Allocation | parité de risque par classe, vol cible 12 %, levier jusqu'à 2× (financé à l'Euribor + 0,5 %) |
+| Tendance | 1, 3, 6, 12 mois contre le cash, score hebdomadaire, changement si 2 horizons sur 4 basculent |
+| Limite de perte -15 % | CPPI m=2, réduction de risque forcée, marge de chute 2,33 σ sur 2 jours, plus haut érodé de 10 %/an |
+| Rotation | bande de 10 % sur le niveau d'exposition (`allocation.gross_band`) |
+| Fiscalité | TOB 0,12 %, Reynders à la revente, taxe de 10 % sur les plus-values |
+
+```bash
+python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay config/profil_belge.yaml \
+  run --data data/backtest/daily_eur.jsonl
+```
+
+Backtest 2007-2026 vu en EUR (étape 5, vol cible 12 %, sans bande
+d'exposition) : 6,0 %/an (5,9 % après liquidation), perte maximale -14,2 %
+(Covid 2020 et 2015-2016 contenus), Sharpe 0,74 ; All-Weather : 6,4 %
+liquidé, -17,7 % ; 60/40 : 8,2 %, -24,1 %. Différences de Sharpe dans le
+bruit statistique (intervalles de confiance larges) ; vol cible 12 % fixée
+plutôt que choisie par le walk-forward. Pas un conseil en investissement.
+
 **Tenir la limite de perte** (variantes `lev15_m2_force*`) :
 
 - `decision.force_risk_reduction: 0.10` : quand l'exposition brute cible

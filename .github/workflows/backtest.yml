@@ -17,13 +17,13 @@ on:
         default: ""
       grid:
         description: "Grille du walk-forward"
-        default: "allocation.target_vol=0.08,0.12,0.16"
+        default: "allocation.gross_band=0,0.10,0.20"
       variants:
         description: "Variantes du moteur"
-        default: "lev15_tendance_lente_m2,lev15_m2_force,lev15_m2_force_gap,lev15_m2_force_gap_decay,lev15_gz_force_gap_decay,lev30_tendance_lente_m2_recolte"
+        default: "profil,profil_bande3"
       overlays:
         description: "Surcouches supplémentaires (séparées par des espaces)"
-        default: "config/leverage.yaml"
+        default: "config/profil_belge.yaml"
       scenarios:
         description: "Scénarios : ucits (vu en USD), eur (vu en EUR), eurh (EUR, obligations couvertes), us"
         default: "eur"
@@ -38,6 +38,7 @@ on:
       - "config/universe_wide.yaml"
       - "config/tax_ucits.yaml"
       - "config/leverage.yaml"
+      - "config/profil_belge.yaml"
       - "config/eur.yaml"
       - "trading_engine/portfolio/financing.py"
       - "trading_engine/allocation/trend.py"
@@ -56,9 +57,9 @@ jobs:
     env:
       START: ${{ inputs.start || '2006-03-01' }}
       SYMBOLS: ${{ inputs.symbols || '' }}
-      GRID: ${{ inputs.grid || 'allocation.target_vol=0.08,0.12,0.16' }}
-      VARIANTS: ${{ inputs.variants || 'lev15_tendance_lente_m2,lev15_m2_force,lev15_m2_force_gap,lev15_m2_force_gap_decay,lev15_gz_force_gap_decay,lev30_tendance_lente_m2_recolte' }}
-      EXTRA: ${{ inputs.overlays || 'config/leverage.yaml' }}
+      GRID: ${{ inputs.grid || 'allocation.gross_band=0,0.10,0.20' }}
+      VARIANTS: ${{ inputs.variants || 'profil,profil_bande3' }}
+      EXTRA: ${{ inputs.overlays || 'config/profil_belge.yaml' }}
       SCENARIOS: ${{ inputs.scenarios || 'eur' }}
       HEDGED: TLT,IEF,TIP
       # Univers : 8 ETF, 3 classes d'actifs (DBC coté depuis février 2006).

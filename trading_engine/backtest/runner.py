@@ -122,6 +122,10 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "lev15_m2_force_gap": {**_LEV15, **_TREND, **_SLOW, **_M2, **_FORCE, **_GAP},
     "lev15_m2_force_gap_decay": {**_LEV15, **_TREND, **_SLOW, **_M2, **_FORCE, **_GAP, **_DECAY},
     "lev15_gz_force_gap_decay": {**_LEV15, **_TREND, **_SLOW, **_FORCE, **_GAP, **_DECAY},
+    # Étape 6 : profil retenu (config/profil_belge.yaml, tout vient de la
+    # surcouche) ; bande de non-trading par actif élargie à 3 %.
+    "profil": {},
+    "profil_bande3": {"decision.no_trade_band": 0.03},
     "lev15_actions": {"allocation.method": "class_parity", "decision.include_alpha": False,
                       "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15,
                       "allocation.class_budgets": {"equity": 0.5, "bonds": 0.25, "commodities": 0.25}},
@@ -154,6 +158,8 @@ VARIANT_LABELS = {
     "lev15_m2_force_gap": "Levier -15 %, CPPI m=2 + réduction forcée + marge de chute",
     "lev15_m2_force_gap_decay": "Levier -15 %, CPPI m=2 + réduction forcée + marge + plus haut érodé",
     "lev15_gz_force_gap_decay": "Levier -15 %, Grossman-Zhou + réduction forcée + marge + plus haut érodé",
+    "profil": "Profil belge (config/profil_belge.yaml)",
+    "profil_bande3": "Profil belge, bande de non-trading 3 % par ETF",
 }
 # Références à poids fixes, rebalancées chaque mois (calculées si leurs symboles
 # sont dans le dataset).
@@ -534,7 +540,8 @@ def run_backtest(
         rows.extend(row(r, eval_start, eval_end, fx) for r in runs)
         if len(runs) > 1:
             # Sélection : sous la limite de drawdown de la variante si elle en a une.
-            limit = max_drawdown or VARIANTS[v].get("allocation.drawdown_control")
+            limit = (max_drawdown or VARIANTS[v].get("allocation.drawdown_control")
+                     or with_params(cfg, VARIANTS[v]).allocation.drawdown_control)
             wf, folds = walk_forward(runs, eval_start, eval_end, runs[default_index], max_drawdown=limit,
                                      lookback_years=wf_lookback_years)
             wf.name = f"{VARIANT_LABELS[v]} — walk-forward (hors échantillon)"
@@ -661,9 +668,12 @@ def provenance(dataset: Path, config, overlays, grid, variants, cost_stress) -> 
                                     capture_output=True, text=True, timeout=10).stdout.strip())
     except (OSError, subprocess.SubprocessError):
         commit, dirty = None, None
+    from trading_engine.config import read_overlay
+
     cfg_hash = hashlib.sha256()
-    for path in [config, *overlays]:
-        cfg_hash.update(Path(path).read_bytes())
+    cfg_hash.update(Path(config).read_bytes())
+    for path in overlays:                   # inclusions résolues comprises
+        cfg_hash.update(json.dumps(read_overlay(path), sort_keys=True, default=str).encode())
     return {
         "dataset_sha256": h.hexdigest(), "dataset_bytes": dataset.stat().st_size,
         "git_commit": commit, "git_dirty": dirty,
