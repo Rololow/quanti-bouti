@@ -118,3 +118,32 @@ class RollingDrawdown:
             self.peak = max(v for _, v in self._days)
         self.drawdown = value / self.peak - 1.0
         return self.drawdown
+
+
+class DecayingPeakDrawdown:
+    """Drawdown par rapport à un plus haut qui s'érode de `decay` par an
+    (0.10 = 10 %/an, en continu), relevé par tout nouveau plus haut.
+
+    Intermédiaire entre le plus haut historique (strict, mais bloque en cash
+    après une perte proche de la limite) et le plus haut glissant 12 mois
+    (qui oublie l'ancien sommet d'un coup) : après une perte, le plancher
+    descend lentement et l'exposition se reconstruit progressivement."""
+
+    def __init__(self, decay: float) -> None:
+        if not 0 < decay < 1:
+            raise ValueError(f"decay must be in (0, 1), got {decay}")
+        self.decay = decay
+        self.peak: float | None = None
+        self._day: date | None = None
+        self.drawdown = 0.0
+
+    def update(self, value: float, day: date) -> float:
+        if value <= 0:
+            return self.drawdown
+        if self.peak is not None and self._day is not None and day > self._day:
+            self.peak *= math.exp(math.log(1.0 - self.decay) * (day - self._day).days / 365.25)
+        self._day = day if self._day is None or day > self._day else self._day
+        if self.peak is None or value > self.peak:
+            self.peak = value
+        self.drawdown = value / self.peak - 1.0
+        return self.drawdown

@@ -144,6 +144,15 @@ class AllocationConfig:
     # dès la première perte) ; 2 = pleine exposition jusqu'à la moitié de la
     # limite environ, puis réduction plus rapide jusqu'à 0 à la limite.
     drawdown_multiplier: float = 1.0
+    # Plus haut de référence qui s'érode de cette part par an (ex. 0.10) ;
+    # exclusif de drawdown_window_days.
+    drawdown_peak_decay: float | None = None
+    # Marge contre les chutes entre deux décisions : la limite effective est
+    # réduite de k × vol du portefeuille × sqrt(jours / 252) (vol ex ante,
+    # exposition comprise ; k = 0 : désactivé). Plus le marché est agité, plus
+    # l'exposition baisse tôt. Jamais sous 40 % de la limite.
+    drawdown_gap_sigmas: float = 0.0
+    drawdown_gap_days: float = 2.0
     trend: TrendConfig = field(default_factory=TrendConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     constraints: Constraints = field(default_factory=Constraints)
@@ -161,6 +170,13 @@ class AllocationConfig:
             raise ValueError("allocation.drawdown_min_scale must be in [0, 1]")
         if self.drawdown_multiplier < 1:
             raise ValueError("allocation.drawdown_multiplier must be >= 1")
+        if self.drawdown_peak_decay is not None:
+            if not 0 < self.drawdown_peak_decay < 1:
+                raise ValueError("allocation.drawdown_peak_decay must be in (0, 1)")
+            if self.drawdown_window_days is not None:
+                raise ValueError("allocation.drawdown_peak_decay and drawdown_window_days are exclusive")
+        if self.drawdown_gap_sigmas < 0 or self.drawdown_gap_days <= 0:
+            raise ValueError("allocation.drawdown_gap_sigmas must be >= 0 and drawdown_gap_days > 0")
         if self.drawdown_window_days is not None and self.drawdown_window_days < 1:
             raise ValueError("allocation.drawdown_window_days must be >= 1")
 

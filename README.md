@@ -170,6 +170,22 @@ sur levier (un arrêt figerait les positions levées au pire moment), et si les
 prix font dériver l'exposition au-delà du plafond + `decision.delever_tolerance`,
 la décision désendette vers la cible sans calcul coût/bénéfice.
 
+**Tenir la limite de perte** (variantes `lev15_m2_force*`) :
+
+- `decision.force_risk_reduction: 0.10` : quand l'exposition brute cible
+  baisse d'au moins 10 % (drawdown, volatilité, tendance), la réduction est
+  exécutée en entier et tout de suite, sans calcul coût/bénéfice ni
+  rebalancement partiel ;
+- `allocation.drawdown_gap_sigmas: 2.33` : la limite effective est réduite
+  de 2,33 × vol du portefeuille × √(2/252), la perte possible avant la
+  décision suivante ; plus le marché est agité, plus l'exposition baisse tôt
+  (jamais sous 40 % de la limite) ;
+- `allocation.drawdown_peak_decay: 0.10` : le plus haut de référence s'érode
+  de 10 %/an au lieu d'être oublié d'un coup après 12 mois.
+
+Le rapport donne pour chaque stratégie sa pire baisse en EUR (sommet, creux,
+durée, retour au sommet) et le nombre de réductions de risque forcées.
+
 **Filtre de tendance** (`allocation.trend`) : chaque poids est multiplié par
 la part des horizons (1, 3, 6, 12 mois) où l'actif a battu le cash ; le
 risque retiré va en cash, ou est redonné aux actifs en tendance jusqu'à la vol

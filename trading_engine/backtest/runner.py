@@ -56,6 +56,10 @@ _LEV30 = {"allocation.method": "class_parity", "decision.include_alpha": False,
           "allocation.drawdown_control": 0.30, "risk.limits.max_drawdown": 0.30}
 _TREND = {"allocation.trend.enabled": True}
 _SLOW = {"allocation.trend.update_every": 5, "allocation.trend.min_change": 0.5}
+_M2 = {"allocation.drawdown_multiplier": 2.0}
+_FORCE = {"decision.force_risk_reduction": 0.10}
+_GAP = {"allocation.drawdown_gap_sigmas": 2.33}
+_DECAY = {"allocation.drawdown_window_days": None, "allocation.drawdown_peak_decay": 0.10}
 
 # Variantes du moteur comparées (paramètres communs à toutes leurs exécutions).
 VARIANTS: dict[str, dict[str, Any]] = {
@@ -110,6 +114,14 @@ VARIANTS: dict[str, dict[str, Any]] = {
                                         "tax.harvest_exemption": True},
     "lev30_tendance_lente_redist_m2": {**_LEV30, **_TREND, **_SLOW, "allocation.drawdown_multiplier": 2.0,
                                        "allocation.trend.redistribute": True},
+    # Étape 5 : tenir la limite de perte (vu en EUR). Réduction de risque
+    # exécutée en entier (decision.force_risk_reduction), marge contre les
+    # chutes entre deux décisions (2,33 σ sur 2 jours), plus haut qui s'érode
+    # de 10 %/an au lieu du plus haut glissant 12 mois.
+    "lev15_m2_force": {**_LEV15, **_TREND, **_SLOW, **_M2, **_FORCE},
+    "lev15_m2_force_gap": {**_LEV15, **_TREND, **_SLOW, **_M2, **_FORCE, **_GAP},
+    "lev15_m2_force_gap_decay": {**_LEV15, **_TREND, **_SLOW, **_M2, **_FORCE, **_GAP, **_DECAY},
+    "lev15_gz_force_gap_decay": {**_LEV15, **_TREND, **_SLOW, **_FORCE, **_GAP, **_DECAY},
     "lev15_actions": {"allocation.method": "class_parity", "decision.include_alpha": False,
                       "allocation.drawdown_control": 0.15, "risk.limits.max_drawdown": 0.15,
                       "allocation.class_budgets": {"equity": 0.5, "bonds": 0.25, "commodities": 0.25}},
@@ -138,6 +150,10 @@ VARIANT_LABELS = {
     "lev30_tendance_lente_redist_m2": "Levier -30 % + tendance lente redistribuée, CPPI m=2",
     "lev15_tendance_lente_m2_recolte": "Levier -15 % + tendance lente, CPPI m=2, récolte de l'exonération",
     "lev30_tendance_lente_m2_recolte": "Levier -30 % + tendance lente, CPPI m=2, récolte de l'exonération",
+    "lev15_m2_force": "Levier -15 %, CPPI m=2 + réduction de risque forcée",
+    "lev15_m2_force_gap": "Levier -15 %, CPPI m=2 + réduction forcée + marge de chute",
+    "lev15_m2_force_gap_decay": "Levier -15 %, CPPI m=2 + réduction forcée + marge + plus haut érodé",
+    "lev15_gz_force_gap_decay": "Levier -15 %, Grossman-Zhou + réduction forcée + marge + plus haut érodé",
 }
 # Références à poids fixes, rebalancées chaque mois (calculées si leurs symboles
 # sont dans le dataset).
@@ -204,7 +220,8 @@ def run_engine(cfg: Config, name: str, params: Mapping[str, Any], *,
     engine = Engine(cfg)
     base_tf = cfg.bar_timeframes[0]
     equity: dict[date, float] = {}
-    counters = {"bars": 0, "halted_bars": 0, "halts": 0, "resets": 0, "decisions": 0, "rebalances": 0}
+    counters = {"bars": 0, "halted_bars": 0, "halts": 0, "resets": 0, "decisions": 0, "rebalances": 0,
+                "forced_reductions": 0}
     halt_reasons: dict[str, int] = {}
     halted_since: list[datetime | None] = [None]
 
@@ -238,6 +255,8 @@ def run_engine(cfg: Config, name: str, params: Mapping[str, Any], *,
     def on_decision(ev) -> None:
         counters["decisions"] += 1
         counters["rebalances"] += ev.payload.get("action") == "UREBALANCE"
+        reasons = ev.payload.get("reasons") or ()
+        counters["forced_reductions"] += bool(reasons) and str(reasons[0]).startswith("réduction de risque forcée")
 
     engine.bus.subscribe(EventType.BAR, on_bar)
     engine.bus.subscribe(EventType.DECISION, on_decision)
@@ -418,6 +437,10 @@ def row(result: StrategyResult, eval_start: date, eval_end: date, fx: FxRates | 
     m = metrics.compute(result.equity, start=eval_start, end=eval_end, fx=fx)
     m["turnover"] = metrics.turnover(result.trades, result.equity, eval_start, eval_end)
     m["transaction_tax"] = sum(a for d, a in result.taxes if eval_start <= d <= eval_end)
+    eur_window = metrics.window(result.equity, eval_start, eval_end)
+    if fx is not None and len(fx):
+        eur_window = [(d, fx.to_base(v, d)) for d, v in eur_window]
+    m["worst_drawdown_eur"] = metrics.worst_drawdown(eur_window)
     liq = (result.stats or {}).get("liquidation_cost")
     window = metrics.window(result.equity, eval_start, eval_end)
     if liq is not None and window and fx is not None and len(fx):
@@ -740,6 +763,18 @@ def format_report(report: dict) -> str:
         for r in report["rows"]:
             ys = r.get("years") or {}
             lines.append(f"| {r['name']} | " + " | ".join(_pct(ys.get(y)) for y in years) + " |")
+
+    worst = [r for r in report["rows"] if (r["metrics"] or {}).get("worst_drawdown_eur")]
+    if worst:
+        lines += ["", "## Pire baisse en EUR (sommet → creux → retour)", "",
+                  "| Stratégie | Baisse | Sommet | Creux | Durée de la baisse | Retour au sommet | "
+                  "Réductions de risque forcées |", "|---|---|---|---|---|---|---|"]
+        for r in worst:
+            w = r["metrics"]["worst_drawdown_eur"]
+            days = (w["trough"] - w["peak"]).days
+            forced = (r.get("stats") or {}).get("forced_reductions")
+            lines.append(f"| {r['name']} | {_pct(w['depth'])} | {w['peak']} | {w['trough']} | {days} j | "
+                         f"{w['recovered'] or 'pas encore'} | {'–' if forced is None else forced} |")
 
     crises = report.get("crises") or []
     if crises:

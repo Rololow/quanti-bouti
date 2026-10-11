@@ -361,3 +361,77 @@ def test_full_exit_never_sells_more_than_held():
     proposed = list(plan.orders) + [r.order for r in plan.rejected]
     sells = [o for o in proposed if o.symbol == sym]
     assert sells and sells[0].quantity == -2_000            # sans le plafond : -2 022
+
+
+# ------------------------------------------------------------------ étape 5 : tenir la limite de perte
+
+def test_decaying_peak_erodes_slowly():
+    from trading_engine.risk.portfolio_risk import DecayingPeakDrawdown
+
+    dd = DecayingPeakDrawdown(0.10)
+    d0 = date(2020, 1, 1)
+    dd.update(100.0, d0)
+    dd.update(85.0, d0 + timedelta(days=1))
+    assert dd.drawdown == pytest.approx(85 / (100 * 0.9 ** (1 / 365.25)) - 1)
+    dd.update(85.0, d0 + timedelta(days=366))                # un an : plus haut × 0,9
+    peak = 100 * 0.9 ** (366 / 365.25)
+    assert dd.peak == pytest.approx(peak) and dd.drawdown == pytest.approx(85 / peak - 1)
+    dd.update(95.0, d0 + timedelta(days=366))                # nouveau plus haut
+    assert dd.peak == 95.0 and dd.drawdown == 0.0
+    with pytest.raises(ValueError):
+        DecayingPeakDrawdown(0.0)
+    with pytest.raises(ValueError, match="exclusive"):
+        AllocationConfig(drawdown_window_days=365, drawdown_peak_decay=0.1)
+
+
+def test_gap_buffer_lowers_the_effective_limit_when_volatile():
+    import math
+
+    from trading_engine.risk.risk_engine import RiskReport
+
+    cfg = load_config()
+    alloc = dataclasses.replace(cfg.allocation, drawdown_control=0.15, drawdown_gap_sigmas=2.33)
+    e = Engine(dataclasses.replace(cfg, allocation=alloc))
+    e.risk.portfolio_drawdown.update(100.0)
+    e.risk.portfolio_drawdown.update(95.0)                   # -5 %
+    calm = dataclasses.replace(e.risk.evaluate(e._raw_snapshot()), portfolio_vol=0.05)
+    e.risk_report = calm
+    scale_calm = e._drawdown_scale()
+    limit = 0.15 - 2.33 * 0.05 * math.sqrt(2 / 252)
+    assert e.drawdown_limit_used == pytest.approx(limit)
+    assert scale_calm == pytest.approx((1 - (1 - limit) / 0.95) / limit)
+    e.risk_report = dataclasses.replace(calm, portfolio_vol=0.60)  # tempête : limite au plancher 40 %
+    assert e._drawdown_scale() == pytest.approx((1 - 0.94 / 0.95) / 0.06)   # bien plus bas qu'au calme
+    assert e.drawdown_limit_used == pytest.approx(0.06) and (1 - 0.94 / 0.95) / 0.06 < scale_calm
+    assert isinstance(calm, RiskReport)
+
+
+def test_risk_reduction_is_executed_in_full():
+    from trading_engine.decision.rebalance import UREBALANCE, DecisionConfig, DecisionContext, DecisionEngine
+
+    cov = np.array([[0.04, 0.0], [0.0, 0.01]])
+    base = dict(timestamp=datetime(2026, 3, 2, 15, tzinfo=UTC), portfolio_value=100_000.0,
+                current={"A": 0.8, "B": 0.7}, target={"A": 0.6, "B": 0.6}, symbols=["A", "B"], cov=cov,
+                prices={"A": 100.0, "B": 50.0}, spreads={"A": 0.0, "B": 0.0}, drawdown_scale=0.6)
+    costly = dict(default_spread_bps=500.0, no_trade_band=0.5, holding_period="5d")
+    assert DecisionEngine(DecisionConfig(**costly)).decide(DecisionContext(**base)).action != UREBALANCE
+    d = DecisionEngine(DecisionConfig(**costly, force_risk_reduction=0.10)).decide(DecisionContext(**base))
+    assert d.action == UREBALANCE and d.fraction == 1.0 and "réduction de risque forcée" in d.reasons[0]
+    assert d.execution_weights == pytest.approx({"A": 0.6, "B": 0.6})
+    calm = dict(base, drawdown_scale=1.0)                    # pas de perte en cours : décision habituelle
+    assert DecisionEngine(DecisionConfig(**costly, force_risk_reduction=0.10)).decide(
+        DecisionContext(**calm)).action != UREBALANCE
+    small = dict(base, target={"A": 0.78, "B": 0.7})         # -1,3 % : décision habituelle
+    assert DecisionEngine(DecisionConfig(**costly, force_risk_reduction=0.10)).decide(
+        DecisionContext(**small)).action != UREBALANCE
+
+
+def test_worst_drawdown_dates():
+    from trading_engine.backtest.metrics import worst_drawdown
+
+    d = [date(2020, 1, 1) + timedelta(days=i) for i in range(6)]
+    w = worst_drawdown(list(zip(d, [100, 110, 90, 80, 100, 111])))
+    assert w["depth"] == pytest.approx(80 / 110 - 1)
+    assert (w["peak"], w["trough"], w["recovered"]) == (d[1], d[3], d[5])
+    assert worst_drawdown(list(zip(d[:3], [100, 101, 102]))) is None
+    assert worst_drawdown(list(zip(d[:3], [100, 90, 95])))["recovered"] is None

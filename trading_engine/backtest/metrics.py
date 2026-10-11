@@ -34,6 +34,26 @@ def max_drawdown(values: Iterable[float]) -> float:
     return worst
 
 
+def worst_drawdown(series: Sequence[tuple[date, float]]) -> dict | None:
+    """Pire baisse : profondeur, sommet, creux et retour au sommet (None si jamais revenu)."""
+    peak_day, peak, worst = None, -math.inf, None
+    for d, v in series:
+        if v > peak:
+            peak, peak_day = v, d
+        if peak > 0:
+            dd = v / peak - 1.0
+            if worst is None or dd < worst["depth"]:
+                worst = {"depth": dd, "peak": peak_day, "trough": d, "recovered": None, "_peak_value": peak}
+    if worst is None or worst["depth"] >= 0:
+        return None
+    for d, v in series:
+        if d > worst["trough"] and v >= worst["_peak_value"]:
+            worst["recovered"] = d
+            break
+    worst.pop("_peak_value")
+    return worst
+
+
 def _stats(series: Sequence[tuple[date, float]]) -> dict:
     if len(series) < 2 or series[0][1] <= 0:
         return {"total_return": None, "cagr": None, "vol": None, "sharpe": None, "sortino": None,
