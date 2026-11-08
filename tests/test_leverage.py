@@ -458,6 +458,7 @@ def test_belgian_profile_bundles_the_retained_settings():
     assert a.drawdown_window_days is None and a.drawdown_peak_decay == 0.10 and a.drawdown_gap_sigmas == 2.33
     assert a.gross_band == 0.10 and a.trend.enabled and a.trend.update_every == 5
     assert cfg.decision.force_risk_reduction == 0.10 and cfg.allocation.constraints.max_gross == 2.0
+    assert cfg.decision.no_trade_band == 0.03
     assert set(cfg.feed.symbols) == {"SPY", "EFA", "EEM", "TLT", "IEF", "TIP", "GLD", "DBC"}
 
 

@@ -183,7 +183,7 @@ inclut `universe_wide.yaml`, `tax_ucits.yaml`, `leverage.yaml` et
 | Allocation | parité de risque par classe, vol cible 12 %, levier jusqu'à 2× (financé à l'Euribor + 0,5 %) |
 | Tendance | 1, 3, 6, 12 mois contre le cash, score hebdomadaire, changement si 2 horizons sur 4 basculent |
 | Limite de perte -15 % | CPPI m=2, réduction de risque forcée, marge de chute 2,33 σ sur 2 jours, plus haut érodé de 10 %/an |
-| Rotation | bande de 10 % sur le niveau d'exposition (`allocation.gross_band`) |
+| Rotation | bande de 10 % sur le niveau d'exposition (`allocation.gross_band`), écart minimal de 3 % par ETF avant de trader (`decision.no_trade_band`) |
 | Fiscalité | TOB 0,12 %, Reynders à la revente, taxe de 10 % sur les plus-values |
 
 ```bash
@@ -191,10 +191,11 @@ python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay
   run --data data/backtest/daily_eur.jsonl
 ```
 
-Backtest 2007-2026 vu en EUR (étape 5, vol cible 12 %, sans bande
-d'exposition) : 6,0 %/an (5,9 % après liquidation), perte maximale -14,2 %
-(Covid 2020 et 2015-2016 contenus), Sharpe 0,74 ; All-Weather : 6,4 %
-liquidé, -17,7 % ; 60/40 : 8,2 %, -24,1 %. Différences de Sharpe dans le
+Backtest 2007-2026 vu en EUR (étape 6, ce profil) : 5,9 %/an (5,8 % après
+liquidation), perte maximale -13,8 % (Covid 2020), Sharpe 0,73, rotation
+2,2/an, TOB 8 600 € sur 20 ans pour 100 000 € ; sans les deux bandes :
+6,0 %, -14,2 %, TOB 9 700 €. All-Weather : 6,4 % liquidé, -17,7 % ; 60/40 :
+8,2 %, -24,1 %. Différences de Sharpe dans le
 bruit statistique (intervalles de confiance larges) ; vol cible 12 % fixée
 plutôt que choisie par le walk-forward. Pas un conseil en investissement.
 

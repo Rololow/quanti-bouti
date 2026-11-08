@@ -13,7 +13,8 @@
 # - filtre de tendance lent (hebdomadaire, 2 horizons sur 4) ;
 # - limite de perte -15 % : CPPI m=2, réduction de risque forcée, marge de
 #   chute, plus haut érodé de 10 %/an ;
-# - bande de 10 % sur le niveau d'exposition (moins de rotation, moins de TOB).
+# - bande de 10 % sur le niveau d'exposition et écart minimal de 3 % par ETF
+#   avant de trader (moins de rotation, moins de TOB).
 #
 # Résultats et limites : README, section « Profil belge ». Rien de tout ceci
 # n'est un conseil en investissement ni un conseil fiscal.
@@ -46,6 +47,9 @@ allocation:
 decision:
   include_alpha: false
   force_risk_reduction: 0.10
+  # Écart minimal par ETF avant de trader : 3 % (2 % par défaut). Backtest
+  # 2007-2026 en EUR : TOB -11 %, perte max -13,8 %, rendement -0,1 point.
+  no_trade_band: 0.03
 
 risk:
   limits:
