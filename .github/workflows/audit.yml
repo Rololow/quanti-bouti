@@ -6,6 +6,11 @@ name: audit
 
 on:
   workflow_dispatch:
+  push:
+    branches: [claude/serene-pascal-lpcpx3]
+    paths:
+      - ".github/workflows/audit.yml"
+      - "trading_engine/backtest/audit.py"
 
 permissions:
   contents: read
