@@ -199,6 +199,19 @@ liquidation), perte maximale -13,8 % (Covid 2020), Sharpe 0,73, rotation
 bruit statistique (intervalles de confiance larges) ; vol cible 12 % fixée
 plutôt que choisie par le walk-forward. Pas un conseil en investissement.
 
+Graphiques (valeur, baisses, années, crises, exposition, risque/rendement) :
+[`notebooks/profil_belge.ipynb`](notebooks/profil_belge.ipynb), exécuté sur
+les données réelles par le workflow `notebook` (Actions -> notebook -> Run
+workflow), qui commite le résultat. En local :
+
+```bash
+python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay config/profil_belge.yaml \
+  run --data data/backtest/daily_eur.jsonl --grid allocation.gross_band=0.10 --variants profil \
+  --cost-stress 0 --series --out data/backtest/report_notebook.json
+pip install -e ".[notebook]"
+jupyter nbconvert --to notebook --execute --inplace notebooks/profil_belge.ipynb
+```
+
 **Tenir la limite de perte** (variantes `lev15_m2_force*`) :
 
 - `decision.force_risk_reduction: 0.10` : quand l'exposition brute cible

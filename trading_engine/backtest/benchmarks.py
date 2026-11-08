@@ -34,6 +34,7 @@ class StrategyResult:
     params: dict = field(default_factory=dict)
     kind: str = "benchmark"
     stats: dict = field(default_factory=dict)                            # infos propres au moteur
+    exposure: list[tuple[date, float]] = field(default_factory=list)     # exposition brute par séance (moteur)
 
 
 def daily_closes(closes: Mapping[str, Sequence[tuple[datetime, float]]]) -> tuple[list[date], dict[str, dict[date, float]]]:

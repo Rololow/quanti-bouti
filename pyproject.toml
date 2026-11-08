@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6.100"]
+notebook = ["nbconvert>=7", "nbclient>=0.10", "ipykernel>=6", "matplotlib>=3.8", "pandas>=2.1"]
 ai = ["anthropic>=1.0"]      # extraction des news par Claude (ai.provider: claude)
 
 [tool.setuptools.packages.find]

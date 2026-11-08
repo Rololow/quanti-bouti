@@ -234,9 +234,15 @@ def test_backtest_end_to_end_on_synthetic_data(tmp_path):
                     "## Traçabilité"):
         assert section in text
     assert json.loads(to_json(report))["eval_start"] == "2025-03-01"
-    # déterministe
-    again = run_backtest(data, **kwargs)
+    # déterministe ; les séries quotidiennes (notebook) ne changent pas les résultats
+    assert report["series"] is None
+    again = run_backtest(data, **kwargs, include_series=True)
     assert [r["metrics"] for r in again["rows"]] == [r["metrics"] for r in report["rows"]]
+    series = again["series"]
+    assert set(series["equity_eur"]) == set(names)
+    assert all(pts and pts[0][0] >= "2025-03-01" for pts in series["equity_eur"].values())
+    assert series["exposure"] and all(pts[0][0] >= "2025-03-01" and all(0 <= g <= 3 for _, g in pts)
+                                      for pts in series["exposure"].values())
 
 
 # ------------------------------------------------------------------ statistiques de robustesse
