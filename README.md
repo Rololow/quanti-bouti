@@ -191,12 +191,14 @@ python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay
   run --data data/backtest/daily_eur.jsonl
 ```
 
-Backtest 2007-2026 vu en EUR (étape 6, ce profil) : 5,9 %/an (5,8 % après
-liquidation), perte maximale -13,8 % (Covid 2020), Sharpe 0,73, rotation
-2,2/an, TOB 8 600 € sur 20 ans pour 100 000 € ; sans les deux bandes :
-6,0 %, -14,2 %, TOB 9 700 €. All-Weather : 6,4 % liquidé, -17,7 % ; 60/40 :
-8,2 %, -24,1 %. Différences de Sharpe dans le
-bruit statistique (intervalles de confiance larges) ; vol cible 12 % fixée
+Backtest mars 2007 - novembre 2026 vu en EUR (ce profil, données au
+6 novembre 2026) : 5,7 %/an (5,6 % après liquidation), perte maximale
+-13,8 % (Covid 2020), volatilité 8,3 %, Sharpe 0,71, rotation 2,2/an, TOB
+8 600 € sur 20 ans pour 100 000 € ; sans la bande d'exposition : 5,7 %,
+-14,1 %, TOB 9 900 €. All-Weather : 6,4 % liquidé, -17,7 %, Sharpe 0,63 ;
+60/40 : 8,1 %, -24,1 %, Sharpe 0,67. Le profil rapporte moins que les
+références mais baisse moins ; les différences de Sharpe restent dans le
+bruit statistique (intervalles de confiance larges). Vol cible 12 % fixée
 plutôt que choisie par le walk-forward. Pas un conseil en investissement.
 
 Graphiques (valeur, baisses, années, crises, exposition, risque/rendement) :
