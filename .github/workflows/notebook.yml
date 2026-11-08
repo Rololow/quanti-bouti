@@ -71,8 +71,10 @@ jobs:
             --cost-stress 0 --series --out data/backtest/report_notebook.json
       - name: Exécution du notebook (lit data/backtest/report_notebook.json)
         run: |
+          # Métadonnées des cellules (horodatages d'exécution) effacées : diff limité aux résultats.
           jupyter nbconvert --to notebook --execute --inplace notebooks/profil_belge.ipynb \
-            --ExecutePreprocessor.timeout=600
+            --ExecutePreprocessor.timeout=600 --ClearMetadataPreprocessor.enabled=True \
+            --ClearMetadataPreprocessor.clear_notebook_metadata=False
       - name: Commit du notebook exécuté
         run: |
           git config user.name "github-actions[bot]"
