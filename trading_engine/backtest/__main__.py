@@ -126,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="walk-forward : meilleur rendement passé sous ce drawdown (ex. 0.15) au lieu du Sharpe")
     run.add_argument("--wf-lookback", type=int, default=3,
                      help="walk-forward : années de passé jugées (0 = tout l'historique)")
+    run.add_argument("--series", action="store_true",
+                     help="séries quotidiennes (valeur en EUR, exposition) dans le rapport JSON, pour le notebook")
     run.add_argument("--workers", type=int, help="processus en parallèle (défaut : nombre de CPU)")
     run.add_argument("--out", default="data/backtest/report.json")
     args = parser.parse_args(argv)
@@ -246,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         grid=grid, variants=[v.strip() for v in args.variants.split(",") if v.strip()], workers=args.workers,
         cost_stress=args.cost_stress, bootstrap_samples=args.bootstrap, max_drawdown=args.max_drawdown,
         wf_lookback_years=args.wf_lookback or None,
+        include_series=args.series,
     )
     out = resolve_path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

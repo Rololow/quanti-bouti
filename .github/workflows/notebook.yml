@@ -1,0 +1,92 @@
+name: notebook
+
+# Exécute notebooks/profil_belge.ipynb sur les données réelles (Yahoo, repli
+# Stooq ; cours BCE) et commite le notebook avec ses graphiques sur la branche.
+# Lancé à la main (Actions -> notebook -> Run workflow) ou par une pull request
+# qui touche le notebook ou le profil. Les données téléchargées ne sont pas
+# commitées : seuls les graphiques et les tableaux le sont.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/notebook.yml"
+      - "notebooks/**"
+      - "config/profil_belge.yaml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: notebook-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  notebook:
+    # Une pull request venue d'un fork n'a pas le droit d'écrire sur la branche.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      START: "2006-03-01"
+      UNIVERSE: config/universe_wide.yaml
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ".[notebook]"
+      - name: Cache des données (une semaine)
+        uses: actions/cache@v4
+        with:
+          path: data/backtest
+          key: daily-v5-${{ env.START }}--${{ github.run_id }}
+          restore-keys: daily-v5-${{ env.START }}--
+      - name: Données quotidiennes
+        run: |
+          if [ -f data/backtest/daily.jsonl.fx.json ] && [ -f data/backtest/daily.jsonl.rates.json ] \
+             && [ -n "$(find data/backtest/daily.jsonl -mtime -7)" ]; then
+            echo "données en cache (moins d'une semaine)"
+          else
+            python -m trading_engine.backtest --overlay "$UNIVERSE" download-daily --start "$START" --source yahoo \
+              || python -m trading_engine.backtest --overlay "$UNIVERSE" download-daily --start "$START" --source stooq
+          fi
+      - name: Dataset vu en EUR (UCITS, dividendes nets)
+        run: |
+          files=()
+          for f in data/backtest/csv_yahoo/*.csv; do files+=("$(basename "$f" .csv)=$f"); done
+          python -m trading_engine.backtest --overlay "$UNIVERSE" --overlay config/tax_ucits.yaml import-csv "${files[@]}" \
+            --net-dividends --currency EUR --rates-from data/backtest/daily.jsonl --out data/backtest/daily_eur.jsonl
+      - name: Backtest du profil belge (séries quotidiennes incluses)
+        run: |
+          python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay config/profil_belge.yaml run \
+            --data data/backtest/daily_eur.jsonl --grid allocation.gross_band=0.10 --variants profil \
+            --cost-stress 0 --series --out data/backtest/report_notebook.json
+      - name: Exécution du notebook (lit data/backtest/report_notebook.json)
+        run: |
+          jupyter nbconvert --to notebook --execute --inplace notebooks/profil_belge.ipynb \
+            --ExecutePreprocessor.timeout=600
+      - name: Commit du notebook exécuté
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add notebooks/profil_belge.ipynb
+          if git diff --cached --quiet; then
+            echo "notebook inchangé"
+            exit 0
+          fi
+          git commit -m "Notebook profil belge : résultats sur données réelles"
+          git pull --rebase origin "$BRANCH"
+          git push origin "HEAD:$BRANCH"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: notebook-report
+          path: |
+            data/backtest/report_notebook.*
+            notebooks/profil_belge.ipynb
+          if-no-files-found: ignore

@@ -183,7 +183,7 @@ inclut `universe_wide.yaml`, `tax_ucits.yaml`, `leverage.yaml` et
 | Allocation | parité de risque par classe, vol cible 12 %, levier jusqu'à 2× (financé à l'Euribor + 0,5 %) |
 | Tendance | 1, 3, 6, 12 mois contre le cash, score hebdomadaire, changement si 2 horizons sur 4 basculent |
 | Limite de perte -15 % | CPPI m=2, réduction de risque forcée, marge de chute 2,33 σ sur 2 jours, plus haut érodé de 10 %/an |
-| Rotation | bande de 10 % sur le niveau d'exposition (`allocation.gross_band`) |
+| Rotation | bande de 10 % sur le niveau d'exposition (`allocation.gross_band`), écart minimal de 3 % par ETF avant de trader (`decision.no_trade_band`) |
 | Fiscalité | TOB 0,12 %, Reynders à la revente, taxe de 10 % sur les plus-values |
 
 ```bash
@@ -191,12 +191,28 @@ python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay
   run --data data/backtest/daily_eur.jsonl
 ```
 
-Backtest 2007-2026 vu en EUR (étape 5, vol cible 12 %, sans bande
-d'exposition) : 6,0 %/an (5,9 % après liquidation), perte maximale -14,2 %
-(Covid 2020 et 2015-2016 contenus), Sharpe 0,74 ; All-Weather : 6,4 %
-liquidé, -17,7 % ; 60/40 : 8,2 %, -24,1 %. Différences de Sharpe dans le
-bruit statistique (intervalles de confiance larges) ; vol cible 12 % fixée
+Backtest mars 2007 - novembre 2026 vu en EUR (ce profil, données au
+6 novembre 2026) : 5,7 %/an (5,6 % après liquidation), perte maximale
+-13,8 % (Covid 2020), volatilité 8,3 %, Sharpe 0,71, rotation 2,2/an, TOB
+8 600 € sur 20 ans pour 100 000 € ; sans la bande d'exposition : 5,7 %,
+-14,1 %, TOB 9 900 €. All-Weather : 6,4 % liquidé, -17,7 %, Sharpe 0,63 ;
+60/40 : 8,1 %, -24,1 %, Sharpe 0,67. Le profil rapporte moins que les
+références mais baisse moins ; les différences de Sharpe restent dans le
+bruit statistique (intervalles de confiance larges). Vol cible 12 % fixée
 plutôt que choisie par le walk-forward. Pas un conseil en investissement.
+
+Graphiques (valeur, baisses, années, crises, exposition, risque/rendement) :
+[`notebooks/profil_belge.ipynb`](notebooks/profil_belge.ipynb), exécuté sur
+les données réelles par le workflow `notebook` (Actions -> notebook -> Run
+workflow), qui commite le résultat. En local :
+
+```bash
+python -m trading_engine.backtest --overlay config/backtest_daily.yaml --overlay config/profil_belge.yaml \
+  run --data data/backtest/daily_eur.jsonl --grid allocation.gross_band=0.10 --variants profil \
+  --cost-stress 0 --series --out data/backtest/report_notebook.json
+pip install -e ".[notebook]"
+jupyter nbconvert --to notebook --execute --inplace notebooks/profil_belge.ipynb
+```
 
 **Tenir la limite de perte** (variantes `lev15_m2_force*`) :
 

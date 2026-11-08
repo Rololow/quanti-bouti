@@ -232,16 +232,19 @@ def run_engine(cfg: Config, name: str, params: Mapping[str, Any], *,
     halted_since: list[datetime | None] = [None]
 
     gross: list[float] = []
+    exposure: dict[date, float] = {}
 
     def on_bar(bar) -> None:
         if bar.timeframe != base_tf:
             return
         value = engine.portfolio.total_value()
-        equity[bar.end.astimezone(NY).date()] = value
+        day = bar.end.astimezone(NY).date()
+        equity[day] = value
         if value > 0:
             p = engine.portfolio
             gross.append(sum(abs(pos.quantity * p.prices.get(s, pos.avg_price))
                              for s, pos in p.positions.items()) / value)
+            exposure[day] = gross[-1]
         counters["bars"] += 1
         if engine.safety.state is SafetyState.HALTED:
             counters["halted_bars"] += 1
@@ -272,6 +275,7 @@ def run_engine(cfg: Config, name: str, params: Mapping[str, Any], *,
     return StrategyResult(
         name=name,
         equity=sorted(equity.items()),
+        exposure=sorted(exposure.items()),
         trades=[(f.timestamp.astimezone(NY).date(), abs(f.quantity * f.price)) for f in engine.fills],
         taxes=[] if tax is None else [(t.day, t.amount) for t in tax.transactions],
         params=dict(params),
@@ -471,6 +475,7 @@ def run_backtest(
     bootstrap_samples: int = 2000,
     max_drawdown: float | None = None,
     wf_lookback_years: int | None = 3,
+    include_series: bool = False,
 ) -> dict:
     dataset = resolve_path(dataset)
     cfg = with_params(load_config(config, tuple(overlays)), {"feed.dataset_path": str(dataset)})
@@ -580,7 +585,23 @@ def run_backtest(
                             trial_sharpes=trial_sharpes if r["kind"] != "benchmark" else None,
                             samples=bootstrap_samples))
 
+    report_series = None
+    if include_series:
+        # Séries quotidiennes (fenêtre d'évaluation, en EUR) pour les graphiques.
+        def to_eur(points):
+            pts = metrics.window(points, eval_start, eval_end)
+            if fx is not None and len(fx):
+                pts = [(d, fx.to_base(v, d)) for d, v in pts]
+            return [[d.isoformat(), round(v, 2)] for d, v in pts]
+
+        report_series = {
+            "equity_eur": {r["name"]: to_eur(series[r["name"]]) for r in rows},
+            "exposure": {r.name: [[d.isoformat(), round(g, 4)] for d, g in metrics.window(r.exposure, eval_start, eval_end)]
+                         for r in engine_runs if r.exposure and not r.kind.startswith("engine:stress:")},
+        }
+
     return {
+        "series": report_series,
         "dataset": str(dataset), "bars_start": days[0], "bars_end": days[-1],
         "eval_start": eval_start, "eval_end": eval_end, "symbols": sorted(prices),
         "fx": None if fx is None else {"source": fx.source, "rates": len(fx)},
