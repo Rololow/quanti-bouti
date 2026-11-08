@@ -1,0 +1,67 @@
+name: audit
+
+# Audit de robustesse du profil belge (sensibilité un paramètre à la fois,
+# deux périodes, Sharpe dégonflé). Lancé à la main ; le rapport s'affiche dans
+# le résumé du job et reste téléchargeable. Rien n'est commité.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      START: "2006-03-01"
+      UNIVERSE: config/universe_wide.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install .
+      - name: Cache des données (une semaine)
+        uses: actions/cache@v4
+        with:
+          path: data/backtest
+          key: daily-v5-${{ env.START }}--${{ github.run_id }}
+          restore-keys: daily-v5-${{ env.START }}--
+      - name: Données quotidiennes
+        run: |
+          if [ -f data/backtest/daily.jsonl.fx.json ] && [ -f data/backtest/daily.jsonl.rates.json ] \
+             && [ -n "$(find data/backtest/daily.jsonl -mtime -7)" ]; then
+            echo "données en cache (moins d'une semaine)"
+          else
+            python -m trading_engine.backtest --overlay "$UNIVERSE" download-daily --start "$START" --source yahoo \
+              || python -m trading_engine.backtest --overlay "$UNIVERSE" download-daily --start "$START" --source stooq
+          fi
+      - name: Dataset vu en EUR (UCITS, dividendes nets)
+        run: |
+          files=()
+          for f in data/backtest/csv_yahoo/*.csv; do files+=("$(basename "$f" .csv)=$f"); done
+          python -m trading_engine.backtest --overlay "$UNIVERSE" --overlay config/tax_ucits.yaml import-csv "${files[@]}" \
+            --net-dividends --currency EUR --rates-from data/backtest/daily.jsonl --out data/backtest/daily_eur.jsonl
+      - name: Audit (une vingtaine de backtests)
+        run: python -m trading_engine.backtest.audit --data data/backtest/daily_eur.jsonl --out data/backtest/audit.json
+      - name: Rapport dans le résumé
+        if: always()
+        run: |
+          if [ -f data/backtest/audit.md ]; then
+            { echo "# Audit de robustesse du profil belge"; echo; cat data/backtest/audit.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: audit-report
+          path: |
+            data/backtest/audit.md
+            data/backtest/audit.json
+          if-no-files-found: ignore
