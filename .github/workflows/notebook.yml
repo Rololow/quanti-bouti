@@ -23,8 +23,11 @@ concurrency:
 
 jobs:
   notebook:
-    # Une pull request venue d'un fork n'a pas le droit d'écrire sur la branche.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Une pull request venue d'un fork n'a pas le droit d'écrire sur la branche ;
+    # le commit du notebook exécuté (github-actions[bot]) ne relance rien.
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -79,7 +82,9 @@ jobs:
             echo "notebook inchangé"
             exit 0
           fi
-          git commit -m "Notebook profil belge : résultats sur données réelles"
+          # [skip ci] : seules les sorties du notebook changent ; sans lui, GitHub crée sur ce
+          # commit des runs en attente d'approbation (acteur github-actions[bot]).
+          git commit -m "Notebook profil belge : résultats sur données réelles [skip ci]"
           git pull --rebase origin "$BRANCH"
           git push origin "HEAD:$BRANCH"
       - uses: actions/upload-artifact@v4
