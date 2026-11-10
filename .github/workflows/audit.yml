@@ -11,6 +11,7 @@ on:
     paths:
       - ".github/workflows/audit.yml"
       - "trading_engine/backtest/audit.py"
+      - "trading_engine/backtest/fastsim.py"
 
 permissions:
   contents: read
@@ -56,11 +57,16 @@ jobs:
             --net-dividends --currency EUR --rates-from data/backtest/daily.jsonl --out data/backtest/daily_eur.jsonl
       - name: Audit (une vingtaine de backtests)
         run: python -m trading_engine.backtest.audit --data data/backtest/daily_eur.jsonl --out data/backtest/audit.json
+      - name: Distribution du profil (bootstrap par blocs, 200 trajectoires)
+        run: python -m trading_engine.backtest.fastsim --data data/backtest/daily_eur.jsonl --paths 200 --block 21 --out data/backtest/montecarlo.json
       - name: Rapport dans le résumé
         if: always()
         run: |
           if [ -f data/backtest/audit.md ]; then
             { echo "# Audit de robustesse du profil belge"; echo; cat data/backtest/audit.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f data/backtest/montecarlo.json ]; then
+            python -c "import json; s=json.load(open('data/backtest/montecarlo.json'))['summary']; m=s['max_drawdown']; c=s['cagr_liquide']; print('# Distribution du profil (' + str(s['paths']) + ' trajectoires)'); print(); print('| | p05 | p50 | p95 |'); print('|---|---|---|---|'); print('| Perte max | ' + ' | '.join(f'{100*m[k]:.1f} %' for k in ('p05','p50','p95')) + ' |'); print('| Rendement liquidé | ' + ' | '.join(f'{100*c[k]:.1f} %' for k in ('p05','p50','p95')) + ' |'); print(); print(f'P(perte max < -15 %) = {100*s[\"p_max_drawdown_below_15pct\"]:.0f} %, P(perte max < -20 %) = {100*s[\"p_max_drawdown_below_20pct\"]:.0f} %')" >> "$GITHUB_STEP_SUMMARY"
           fi
       - uses: actions/upload-artifact@v4
         if: always()
@@ -69,4 +75,5 @@ jobs:
           path: |
             data/backtest/audit.md
             data/backtest/audit.json
+            data/backtest/montecarlo.json
           if-no-files-found: ignore
